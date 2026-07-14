@@ -1,0 +1,8 @@
+# Personal, non-committed overrides (ports, ADMIN_SEED_PASSWORD, …).
+.env
+.env.*.local
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/

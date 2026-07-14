@@ -1,0 +1,133 @@
+# VecheMoga full local stack: Postgres + the Spring API + the Next.js web app +
+# a mail-capture server, all in containers. This is the umbrella that ties the
+# sibling app repos together (the analog of Sesame's Local-Development/backend-docker)
+# - the app Dockerfiles live in their own repos (../../VecheMogaApi, ../../VecheMogaWeb),
+# this file only composes them.
+#
+# It is automation-ready by default: the API's `local` profile already seeds the
+# admin (admin@vechemoga.bg / admin) and the mailserver captures outgoing email, so
+# the VecheMogaAutomation suite runs against `./run.sh up` with no extra mode.
+#
+# Drive it with ./run.sh (interactive menu or ./run.sh up|infra|no-api|no-web|...).
+#
+# Ports on the host: web 3000, api 8080, postgres 5432, mailserver 1080 - these match
+# VecheMogaAutomation's .env defaults, so the suite runs against this stack unchanged.
+name: vechemoga-local
+
+services:
+  # Mirrors VecheMogaApi/compose.yaml (same image, creds, healthcheck) so the API's
+  # `local` Spring profile reaches it at postgres:5432. Its own volume, independent
+  # of the vechemoga-api project's.
+  postgres:
+    image: 'postgres:17'
+    environment:
+      - 'POSTGRES_DB=${POSTGRES_DB:-vechemoga}'
+      - 'POSTGRES_USER=${POSTGRES_USER:-vechemoga}'
+      - 'POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-vechemoga}'
+      - 'TZ=UTC'
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - 'pgdata:/var/lib/postgresql/data'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-vechemoga} -d ${POSTGRES_DB:-vechemoga}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # The Spring API, built from its own repo's Dockerfile. The `local` profile
+  # (application-local.yml) already points the datasource at postgres:5432 and seeds
+  # the admin (admin@vechemoga.bg / admin). The one thing that profile leaves off is
+  # transactional email (no capture server exists for a bare host run) - but this
+  # stack DOES run one, so we turn email on here and point it at the mailserver, via
+  # -D system properties in JAVA_OPTS (the image entrypoint is `java $JAVA_OPTS -jar`;
+  # the -D form avoids env-var relaxed-binding surprises). Property names verified
+  # against the BE: vechemoga.email.enabled (LoopsMailConfig), vechemoga.email.loops.base-url.
+  api:
+    build:
+      context: ../../VecheMogaApi
+      dockerfile: Dockerfile
+    image: 'vechemoga-api:local'
+    environment:
+      - 'SPRING_PROFILES_ACTIVE=local'
+      - >-
+        JAVA_OPTS=-XX:MaxRAMPercentage=75
+        -Dvechemoga.email.enabled=true
+        -Dvechemoga.email.loops.base-url=http://mailserver:1080
+    ports:
+      - '${API_PORT:-8080}:8080'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailserver:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:8080/actuator/health | grep -q ''"status":"UP"''']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  # First-party, zero-dependency mail capture (Node's http only) - the same script
+  # the suite can also run on the host via `npm run mailserver`, mounted read-only so
+  # there is no second copy to keep in sync. It answers 200 to the API's send and
+  # remembers each message so a test (or you) can read the verification link back out
+  # at http://localhost:1080/__mailbox/messages.
+  mailserver:
+    image: 'node:20-alpine'
+    working_dir: /app
+    command: ['node', 'mail-server.mjs']
+    volumes:
+      - '../../VecheMogaAutomation/scripts/mail-server.mjs:/app/mail-server.mjs:ro'
+    environment:
+      - 'MAIL_MOCK_PORT=1080'
+    ports:
+      - '${MAIL_PORT:-1080}:1080'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:1080/__mailbox/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+  # The Next.js app, built from its own repo's Dockerfile (runs `next dev` with the
+  # env.local profile). No depends_on: the web app starts independently and tolerates
+  # the API not being ready yet, which keeps the `no-api` subset (web only, API from
+  # the IDE) working. The browser reaches the API at localhost:8080 (baked into
+  # env.local); server-side render reaches it at api:8080 via API_INTERNAL_BASE_URL.
+  web:
+    build:
+      context: ../../VecheMogaWeb
+      dockerfile: Dockerfile
+    image: 'vechemoga-web:local'
+    environment:
+      # Server-side (SSR) API origin. Defaults to the api service on the compose
+      # network; run.sh's `no-api` subset overrides it to host.docker.internal so a
+      # containerised web can reach an API you run from the IDE on the host.
+      - 'API_INTERNAL_BASE_URL=${API_INTERNAL_BASE_URL:-http://api:8080}'
+    extra_hosts:
+      # Linux parity: Docker Desktop (mac/win) resolves host.docker.internal already.
+      - 'host.docker.internal:host-gateway'
+    ports:
+      - '${WEB_PORT:-3000}:3000'
+    restart: unless-stopped
+    healthcheck:
+      # "Healthy" = the dev server answers with ANY HTTP status. The apex homepage
+      # 500s until a CMS home page is published (fresh DB), so a status-strict probe
+      # would wrongly mark the app down - node exits 0 on any response, 1 only on a
+      # connection error. node is always present in the image.
+      test:
+        - 'CMD'
+        - 'node'
+        - '-e'
+        - "require('http').get('http://localhost:3000/',r=>process.exit(0)).on('error',()=>process.exit(1))"
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 90s
+
+volumes:
+  pgdata:
+    driver: local
