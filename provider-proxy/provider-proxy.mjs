@@ -40,21 +40,18 @@
 
 import http from "node:http";
 
-/** First env value that is set to a valid integer, else the fallback. Empty-string and
- *  non-numeric are treated as unset, so `PROXY_PORT=` can't silently collapse to 0
- *  (Compose passes through an empty string for an unset .env key). */
-function intEnv(names, fallback) {
-  for (const name of names) {
-    const raw = process.env[name];
-    if (raw == null || raw === "") continue;
-    const n = Number(raw);
-    if (Number.isFinite(n)) return n;
-  }
-  return fallback;
+/** An env var read as an integer, else the fallback. Empty-string and non-numeric are
+ *  treated as unset, so `PROXY_PORT=` can't silently collapse to 0 (Compose passes
+ *  through an empty string for an unset .env key). */
+function intEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 // The compose maps the host port and lets the container keep this default.
-const PORT = intEnv(["PROXY_PORT"], 1080);
+const PORT = intEnv("PROXY_PORT", 1080);
 // Where unmatched traffic is proxied. Unset locally (tests always register an
 // expectation for their own traffic, so the proxy path is never taken); set it
 // in dev to the real provider so non-test traffic passes straight through.
@@ -62,7 +59,7 @@ const UPSTREAM = (process.env.PROXY_UPSTREAM_URL ?? "").replace(/\/$/, "");
 // Safety cap so a suite that forgets to dispose can't grow the journal unbounded.
 // Disposing an expectation prunes its own entries, so in practice the journal tracks
 // only in-flight captures and stays far below this.
-const JOURNAL_MAX = intEnv(["PROXY_JOURNAL_MAX"], 5000);
+const JOURNAL_MAX = intEnv("PROXY_JOURNAL_MAX", 5000);
 
 let seq = 0;
 /** @type {{ id: string, method?: string, path?: string, bodyMatch?: Record<string, unknown>, respond: { status: number, headers: Record<string,string>, body: string } }[]} */
@@ -228,6 +225,15 @@ const server = http.createServer(async (req, res) => {
       const byId = q.get("expectationId");
       const bodyPath = q.get("bodyPath");
       const bodyValue = q.get("bodyValue")?.toLowerCase();
+      // The two are one filter and are useless apart: bodyPath alone would compare every
+      // entry against undefined and quietly return [], which reads as "nothing was captured"
+      // and sends the caller into a poll-until-timeout instead of naming the real mistake.
+      if ((bodyPath == null) !== (bodyValue == null)) {
+        return json(res, 400, {
+          error: "bodyPath and bodyValue must be given together",
+          got: { bodyPath: bodyPath ?? null, bodyValue: q.get("bodyValue") ?? null },
+        });
+      }
       const out = journal.filter((r) => {
         if (byId && r.matchedExpectationId !== byId) return false;
         if (bodyPath) {

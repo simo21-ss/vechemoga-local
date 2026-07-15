@@ -19,25 +19,36 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 
-# Adopt .env's values for our own probes and printed URLs. Compose gets the same file via
-# --env-file below, but that only feeds ITS interpolation - without this, a port overridden
-# in .env would move the container while run.sh kept probing the default (a silent 3-minute
-# wait_for timeout against the wrong port). An already-exported var wins, matching Compose's
-# precedence (shell env > --env-file).
-if [[ -f "$ROOT_DIR/.env" ]]; then
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ ^[[:space:]]*# ]] && continue
-    [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
-    key="${BASH_REMATCH[1]}"
-    [[ -n "${!key:-}" ]] && continue      # already set in the shell -> that wins
-    export "$key=${BASH_REMATCH[2]}"
-  done < "$ROOT_DIR/.env"
-fi
+# Read ONE port key out of .env, or nothing if it isn't there. Compose gets the whole file
+# via --env-file below and owns everything in it; this only recovers the handful of values
+# run.sh needs for its own probes and printed URLs, so a key like COMPOSE_PROJECT_NAME can
+# never reach Compose through our environment. Nothing is exported for the same reason.
+#
+# The stripping mirrors Compose's own .env rules: surrounding quotes are removed, and an
+# unquoted trailing `# comment` is dropped. Anything fancier (escapes, multi-line values)
+# is Compose's business - `dc port` below is what we actually trust once containers exist,
+# so this only has to be right enough to name a port before then.
+env_port() { # key -> value from .env, else empty
+  local key="$1" line value
+  [[ -f "$ROOT_DIR/.env" ]] || return 0
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ROOT_DIR/.env" | tail -1)" || return 0
+  [[ -n "$line" ]] || return 0
+  value="${line#*=}"
+  if [[ "$value" =~ ^[[:space:]]*\"(.*)\"[[:space:]]*$ || "$value" =~ ^[[:space:]]*\'(.*)\'[[:space:]]*$ ]]; then
+    value="${BASH_REMATCH[1]}"                       # quoted: take it verbatim
+  else
+    value="${value%%#*}"                             # unquoted: a # starts a comment
+  fi
+  value="${value#"${value%%[![:space:]]*}"}"         # trim leading space
+  value="${value%"${value##*[![:space:]]}"}"         # trim trailing space
+  printf '%s' "$value"
+}
 
-WEB_PORT="${WEB_PORT:-3000}"
-API_PORT="${API_PORT:-8080}"
-POSTGRES_PORT="${POSTGRES_PORT:-5432}"
-PROXY_PORT="${PROXY_PORT:-1080}"
+# Shell env wins over .env, matching Compose's precedence (shell env > --env-file).
+WEB_PORT="${WEB_PORT:-$(env_port WEB_PORT)}";           WEB_PORT="${WEB_PORT:-3000}"
+API_PORT="${API_PORT:-$(env_port API_PORT)}";           API_PORT="${API_PORT:-8080}"
+POSTGRES_PORT="${POSTGRES_PORT:-$(env_port POSTGRES_PORT)}"; POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+PROXY_PORT="${PROXY_PORT:-$(env_port PROXY_PORT)}";     PROXY_PORT="${PROXY_PORT:-1080}"
 
 # Prefer the Compose v2 plugin; fall back to the legacy binary.
 if docker compose version >/dev/null 2>&1; then
@@ -56,6 +67,21 @@ ENV_ARGS=()
 [[ -f "$ROOT_DIR/.env" ]] && ENV_ARGS=(--env-file "$ROOT_DIR/.env")
 
 dc() { "${COMPOSE[@]}" ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} -f "$COMPOSE_FILE" "$@"; }
+
+# Re-read the ports from Compose once the containers exist. Compose resolved .env itself, so
+# what it published is the truth - asking it cannot drift from it, which is the failure this
+# whole dance exists to prevent. Only a service that is actually running can answer: `no-api`
+# scales the API to 0 (it's a host process there), so that one keeps its .env/default value.
+sync_ports_from_compose() {
+  local hostport
+  for spec in "web:3000:WEB_PORT" "api:8080:API_PORT" "postgres:5432:POSTGRES_PORT" "provider-proxy:1080:PROXY_PORT"; do
+    local svc="${spec%%:*}" rest="${spec#*:}"
+    local cport="${rest%%:*}" var="${rest#*:}"
+    # `dc port` prints e.g. "0.0.0.0:1090"; take the last line's port, ignore IPv6 duplicates.
+    hostport="$(dc port "$svc" "$cport" 2>/dev/null | tail -1)" || continue
+    [[ "$hostport" =~ :([0-9]+)[[:space:]]*$ ]] && printf -v "$var" '%s' "${BASH_REMATCH[1]}"
+  done
+}
 
 wait_for() { # name url
   local name="$1" url="$2" i
@@ -81,6 +107,7 @@ urls() {
 # defined in the file, so they are untouched.
 start_all() {
   dc up -d --build --remove-orphans
+  sync_ports_from_compose
   wait_for api "http://localhost:${API_PORT}/actuator/health"
   urls
   echo
@@ -90,6 +117,7 @@ start_all() {
 
 start_infra() {
   dc up -d --remove-orphans postgres provider-proxy
+  sync_ports_from_compose
   wait_for provider-proxy "http://localhost:${PROXY_PORT}/__proxy/health"
   echo
   echo "  postgres  → localhost:${POSTGRES_PORT}   ·   provider-proxy → http://localhost:${PROXY_PORT}"
@@ -100,12 +128,14 @@ start_no_api() {
   # Web + provider-proxy in containers, API from your IDE on the host. Point the web's
   # SSR at the host so server-rendered pages still reach the IDE-run API.
   API_INTERNAL_BASE_URL="http://host.docker.internal:${API_PORT}" dc up -d --build --remove-orphans --scale api=0
+  sync_ports_from_compose
   urls
   echo "API is NOT running - start it from your IDE (bootRun) on :${API_PORT}."
 }
 
 start_no_web() {
   dc up -d --build --remove-orphans --scale web=0
+  sync_ports_from_compose
   wait_for api "http://localhost:${API_PORT}/actuator/health"
   urls
   echo "Web is NOT running - start it from the host:  cd ../../VecheMogaWeb && npm run dev:compose"
