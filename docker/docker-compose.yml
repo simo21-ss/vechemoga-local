@@ -1,16 +1,16 @@
-# VecheMoga full local stack: Postgres + the Spring API + the Next.js web app +
-# a mail-capture server, all in containers. This is the umbrella that ties the
-# sibling app repos together (the analog of Sesame's Local-Development/backend-docker)
-# - the app Dockerfiles live in their own repos (../../VecheMogaApi, ../../VecheMogaWeb),
-# this file only composes them.
+# VecheMoga full local stack: Postgres + the Spring API + the Next.js web app + a
+# proxy-mock for the API's outbound providers, all in containers. This is the umbrella
+# that ties the sibling app repos together (the analog of Sesame's
+# Local-Development/backend-docker) - the app Dockerfiles live in their own repos
+# (../../VecheMogaApi, ../../VecheMogaWeb), this file only composes them.
 #
 # It is automation-ready by default: the API's `local` profile already seeds the
-# admin (admin@vechemoga.bg / admin) and the mailserver captures outgoing email, so
+# admin (admin@vechemoga.bg / admin) and the provider-proxy captures outgoing email, so
 # the VecheMogaAutomation suite runs against `./run.sh up` with no extra mode.
 #
 # Drive it with ./run.sh (interactive menu or ./run.sh up|infra|no-api|no-web|...).
 #
-# Ports on the host: web 3000, api 8080, postgres 5432, mailserver 1080 - these match
+# Ports on the host: web 3000, api 8080, postgres 5432, provider-proxy 1080 - these match
 # VecheMogaAutomation's .env defaults, so the suite runs against this stack unchanged.
 name: vechemoga-local
 
@@ -40,7 +40,7 @@ services:
   # (application-local.yml) already points the datasource at postgres:5432 and seeds
   # the admin (admin@vechemoga.bg / admin). The one thing that profile leaves off is
   # transactional email (no capture server exists for a bare host run) - but this
-  # stack DOES run one, so we turn email on here and point it at the mailserver, via
+  # stack DOES run one, so we turn email on here and point it at the provider-proxy, via
   # -D system properties in JAVA_OPTS (the image entrypoint is `java $JAVA_OPTS -jar`;
   # the -D form avoids env-var relaxed-binding surprises). Property names verified
   # against the BE: vechemoga.email.enabled (LoopsMailConfig), vechemoga.email.loops.base-url.
@@ -54,13 +54,13 @@ services:
       - >-
         JAVA_OPTS=-XX:MaxRAMPercentage=75
         -Dvechemoga.email.enabled=true
-        -Dvechemoga.email.loops.base-url=http://mailserver:1080
+        -Dvechemoga.email.loops.base-url=http://provider-proxy:1080
     ports:
       - '${API_PORT:-8080}:8080'
     depends_on:
       postgres:
         condition: service_healthy
-      mailserver:
+      provider-proxy:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -70,23 +70,30 @@ services:
       retries: 12
       start_period: 40s
 
-  # First-party, zero-dependency provider proxy-mock (Node's http only) - the same script
-  # the suite can also run on the host via `npm run proxy`, mounted read-only so there is
-  # no second copy to keep in sync. It sits in front of the API's transactional-email
-  # provider: unmatched traffic is proxied to PROXY_UPSTREAM_URL (unset here, so nothing
-  # leaves the box), and a test registers an expectation keyed on the recipient email via
-  # the control plane at http://localhost:1080/__proxy/* so it can read the verification
-  # link back out of the journal (GET /__proxy/requests).
-  mailserver:
+  # First-party, zero-dependency provider proxy-mock (Node's http only), owned by this repo
+  # (../provider-proxy - see its README for the control plane). It sits in front of the API's
+  # transactional-email provider for the whole stack, tests or not: a client registers an
+  # expectation keyed on the recipient email via the control plane at
+  # http://localhost:1080/__proxy/* and reads the verification link back out of the journal
+  # (GET /__proxy/requests); anything unmatched goes to PROXY_UPSTREAM_URL.
+  #
+  # PROXY_UPSTREAM_URL is deliberately EMPTY by default, so unmatched mail 502s instead of
+  # reaching real inboxes - an unmatched send is either a test that forgot to register an
+  # expectation or a hand-registration in the browser, and neither should page a real person.
+  # Set it in .env (see ../.env.example) to https://app.loops.so/api to opt into passthrough.
+  # Mounted read-only: the script needs no install, so the stock node image runs it as-is.
+  provider-proxy:
     image: 'node:20-alpine'
     working_dir: /app
     command: ['node', 'provider-proxy.mjs']
     volumes:
-      - '../../VecheMogaAutomation/scripts/provider-proxy.mjs:/app/provider-proxy.mjs:ro'
+      - '../provider-proxy/provider-proxy.mjs:/app/provider-proxy.mjs:ro'
     environment:
-      - 'MAIL_MOCK_PORT=1080'
+      - 'PROXY_UPSTREAM_URL=${PROXY_UPSTREAM_URL:-}'
     ports:
-      - '${MAIL_PORT:-1080}:1080'
+      # Inside the container the proxy always listens on its default 1080 (no PROXY_PORT is
+      # passed in), so PROXY_PORT here only remaps the HOST side - one name, one meaning.
+      - '${PROXY_PORT:-1080}:1080'
     healthcheck:
       test: ['CMD-SHELL', 'wget -q --spider http://localhost:1080/__proxy/health || exit 1']
       interval: 10s

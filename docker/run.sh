@@ -5,8 +5,8 @@
 #
 # Interactive:   ./run.sh
 # Non-interactive:
-#   ./run.sh up        build + start the full stack (postgres + api + web + mailserver)
-#   ./run.sh infra     postgres + mailserver only  (run api and/or web yourself)
+#   ./run.sh up        build + start the full stack (postgres + api + web + provider-proxy)
+#   ./run.sh infra     postgres + provider-proxy only  (run api and/or web yourself)
 #   ./run.sh no-api    everything except the API  (run the API from your IDE on :8080)
 #   ./run.sh no-web    everything except the web  (run the web from the host: npm run dev:compose)
 #   ./run.sh stop      stop containers, keep the data
@@ -19,10 +19,25 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 
+# Adopt .env's values for our own probes and printed URLs. Compose gets the same file via
+# --env-file below, but that only feeds ITS interpolation - without this, a port overridden
+# in .env would move the container while run.sh kept probing the default (a silent 3-minute
+# wait_for timeout against the wrong port). An already-exported var wins, matching Compose's
+# precedence (shell env > --env-file).
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
+    key="${BASH_REMATCH[1]}"
+    [[ -n "${!key:-}" ]] && continue      # already set in the shell -> that wins
+    export "$key=${BASH_REMATCH[2]}"
+  done < "$ROOT_DIR/.env"
+fi
+
 WEB_PORT="${WEB_PORT:-3000}"
 API_PORT="${API_PORT:-8080}"
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"
-MAIL_PORT="${MAIL_PORT:-1080}"
+PROXY_PORT="${PROXY_PORT:-1080}"
 
 # Prefer the Compose v2 plugin; fall back to the legacy binary.
 if docker compose version >/dev/null 2>&1; then
@@ -57,11 +72,15 @@ urls() {
   echo "  web       → http://localhost:${WEB_PORT}   (admin.localhost:${WEB_PORT} · kid.localhost:${WEB_PORT})"
   echo "  api       → http://localhost:${API_PORT}   (health: /actuator/health · ping: /api/ping)"
   echo "  postgres  → localhost:${POSTGRES_PORT}      (db/user/pass: vechemoga · admin: admin@vechemoga.bg / admin)"
-  echo "  mail proxy→ http://localhost:${MAIL_PORT}/__proxy/requests  (control plane: /__proxy/*)"
+  echo "  proxy     → http://localhost:${PROXY_PORT}/__proxy/requests  (control plane: /__proxy/*)"
 }
 
+# --remove-orphans on every `up`: it drops containers whose service no longer exists in the
+# compose file, so a renamed service (mailserver -> provider-proxy) doesn't leave the old
+# container behind holding :1080. Services that are merely not part of this subset are still
+# defined in the file, so they are untouched.
 start_all() {
-  dc up -d --build
+  dc up -d --build --remove-orphans
   wait_for api "http://localhost:${API_PORT}/actuator/health"
   urls
   echo
@@ -70,30 +89,30 @@ start_all() {
 }
 
 start_infra() {
-  dc up -d postgres mailserver
-  wait_for mailserver "http://localhost:${MAIL_PORT}/__proxy/health"
+  dc up -d --remove-orphans postgres provider-proxy
+  wait_for provider-proxy "http://localhost:${PROXY_PORT}/__proxy/health"
   echo
-  echo "  postgres  → localhost:${POSTGRES_PORT}   ·   mailserver → http://localhost:${MAIL_PORT}"
+  echo "  postgres  → localhost:${POSTGRES_PORT}   ·   provider-proxy → http://localhost:${PROXY_PORT}"
   echo "Now run the apps yourself (API from the IDE, web via 'npm run dev:compose')."
 }
 
 start_no_api() {
-  # Web + mailserver in containers, API from your IDE on the host. Point the web's
+  # Web + provider-proxy in containers, API from your IDE on the host. Point the web's
   # SSR at the host so server-rendered pages still reach the IDE-run API.
-  API_INTERNAL_BASE_URL="http://host.docker.internal:${API_PORT}" dc up -d --build --scale api=0
+  API_INTERNAL_BASE_URL="http://host.docker.internal:${API_PORT}" dc up -d --build --remove-orphans --scale api=0
   urls
   echo "API is NOT running - start it from your IDE (bootRun) on :${API_PORT}."
 }
 
 start_no_web() {
-  dc up -d --build --scale web=0
+  dc up -d --build --remove-orphans --scale web=0
   wait_for api "http://localhost:${API_PORT}/actuator/health"
   urls
   echo "Web is NOT running - start it from the host:  cd ../../VecheMogaWeb && npm run dev:compose"
 }
 
 do_stop()  { dc stop; echo "Stopped. Data kept - start again with ./run.sh up."; }
-do_clean() { dc down -v --rmi local; echo "Removed containers, volumes, and the vechemoga-*:local images."; }
+do_clean() { dc down -v --rmi local --remove-orphans; echo "Removed containers, volumes, and the vechemoga-*:local images."; }
 do_logs()  { if [[ $# -gt 0 ]]; then dc logs -f "$1"; else dc logs -f; fi; }
 do_ps()    { dc ps; }
 
@@ -122,8 +141,8 @@ fi
 while true; do
   echo
   echo "===== vechemoga-local · Docker ====="
-  echo "  1) Start full stack   (postgres + api + web + mailserver — automation-ready)"
-  echo "  2) Infra only         (postgres + mailserver — run the apps yourself)"
+  echo "  1) Start full stack   (postgres + api + web + provider-proxy — automation-ready)"
+  echo "  2) Infra only         (postgres + provider-proxy — run the apps yourself)"
   echo "  3) All except api     (run the API from the IDE)"
   echo "  4) All except web     (run the web from the host)"
   echo "  5) Stop               (keep data)"
