@@ -70,7 +70,8 @@ Test-facing, all under `/__proxy`. This is the contract client code is written a
 `GET /__proxy/requests` takes `?expectationId=` and/or `?bodyPath=&bodyValue=` (dotted
 path, case-insensitive compare) to scope reads. **Prefer `expectationId`** — it is what
 keeps parallel Cucumber workers from reading each other's mail regardless of whether
-recipients happen to be unique.
+recipients happen to be unique. `bodyPath` and `bodyValue` are one filter and must be sent
+together; either one alone is a `400` rather than a misleading empty result.
 
 Only **matched** requests are journaled, so real proxied mail is never recorded.
 

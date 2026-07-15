@@ -268,6 +268,29 @@ test("re-registration supersedes: the newest expectation's token is what's read"
   await clearExpectation(idOld);
 });
 
+// bodyPath and bodyValue are one filter. Half of it used to compare every entry against
+// undefined and return [], which a caller reads as "nothing captured" and polls to a timeout.
+test("bodyPath without bodyValue is rejected, not silently empty", async () => {
+  await ensureUp();
+  const email = `halffilter+${rand()}@test.local`;
+  const id = await expectMail(email);
+  await appSends(email, "tok-HALF");
+  await waitForToken(id); // the entry is definitely in the journal
+
+  for (const query of [`bodyPath=email`, `bodyValue=${encodeURIComponent(email)}`]) {
+    const res = await fetch(`${PROXY_URL}/__proxy/requests?${query}`);
+    assert.equal(res.status, 400, `${query} alone must 400, not return a misleading []`);
+    assert.match((await res.json()).error, /together/);
+  }
+
+  // The complete filter still works, so the guard didn't break the real path.
+  const ok = await fetch(`${PROXY_URL}/__proxy/requests?bodyPath=email&bodyValue=${encodeURIComponent(email)}`);
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).length, 1);
+
+  await clearExpectation(id);
+});
+
 test("journal is pruned back to empty once expectations are cleared", async () => {
   await ensureUp();
   const leftover = await (await fetch(`${PROXY_URL}/__proxy/requests`)).json();
