@@ -19,10 +19,13 @@ VecheMoga/
 ├── VecheMogaAutomation   Cucumber + Playwright suite (runs on the host)
 └── VecheMogaLocal        ← you are here (compose + scripts)
     ├── docker/
-    │   ├── docker-compose.yml   the stack: postgres, api, web, mailserver
+    │   ├── docker-compose.yml   the stack: postgres, api, web, provider-proxy
     │   ├── run.sh               interactive menu + non-interactive commands
     │   ├── stop.sh / clean.sh / showServiceNames.sh
-    └── .env.example             optional port/credential overrides
+    ├── provider-proxy/          source of the `provider-proxy` service (zero-dependency)
+    │   ├── provider-proxy.mjs   proxy-mock for the API's outbound providers (today: email)
+    │   └── test/                its contract test (`node --test test/`)
+    └── .env.example             optional port/credential/upstream overrides
 ```
 
 ## Prerequisites
@@ -46,6 +49,7 @@ Then:
 | Web — kid host | http://kid.localhost:3000 |
 | API | http://localhost:8080 (`/actuator/health`, `/api/ping`) |
 | Postgres | `localhost:5432` (db/user/pass: `vechemoga`) |
+| Provider proxy ([`provider-proxy/`](provider-proxy/README.md)) | http://localhost:1080 (control plane: `/__proxy/*`) |
 
 `admin.localhost` / `kid.localhost` resolve to 127.0.0.1 automatically in
 Chrome/Safari/Edge — the Next app splits the hosts in `src/proxy.ts`.
@@ -55,13 +59,13 @@ The interactive menu (just `./run.sh`) offers the same options as the commands b
 ## Commands
 
 ```bash
-./run.sh up        # full stack: postgres + api + web + mailserver (automation-ready)
-./run.sh infra     # postgres + mailserver only — run the apps yourself
+./run.sh up        # full stack: postgres + api + web + provider-proxy (automation-ready)
+./run.sh infra     # postgres + provider-proxy only — run the apps yourself
 ./run.sh no-api    # everything except the API  (run it from your IDE on :8080)
 ./run.sh no-web    # everything except the web  (run it from the host: npm run dev:compose)
 ./run.sh stop      # stop, keep data
 ./run.sh clean     # remove containers, volumes, and the built local images
-./run.sh logs [svc]# follow logs (all, or one service: api | web | postgres | mailserver)
+./run.sh logs [svc]# follow logs (all, or one service: api | web | postgres | provider-proxy)
 ./run.sh ps        # container status
 ```
 
@@ -81,7 +85,7 @@ Desktop shows one group. DB data persists in the `pgdata` volume across restarts
 
 The suite ([`VecheMogaAutomation`](../VecheMogaAutomation)) runs on the **host** and
 targets the published ports. The default stack is already automation-ready — the API's
-`local` profile seeds the admin and the mailserver captures outgoing email — so there
+`local` profile seeds the admin and the provider-proxy captures outgoing email — so there
 is no special mode: `./run.sh up` is enough.
 
 ```bash
@@ -106,14 +110,19 @@ with the stack out of the box. The suite **never** targets production.
   that profile leaves off is transactional email (a bare host run has nowhere to send
   it), so — because this stack *does* run a capture server — the compose turns email
   on via `JAVA_OPTS` `-D` properties: `vechemoga.email.enabled=true` +
-  `vechemoga.email.loops.base-url=http://mailserver:1080`.
+  `vechemoga.email.loops.base-url=http://provider-proxy:1080`.
 - **Web** runs `next dev` with its committed `env.local` profile (same as
   `npm run dev:compose`). The **browser** calls the API at `localhost:8080` (baked
   into `env.local`); **server-side** rendering calls it at `api:8080` via the
   server-only `API_INTERNAL_BASE_URL` (see `VecheMogaWeb/src/lib/api/base.ts`).
-- **mailserver** is the automation suite's own `scripts/mail-server.mjs`, mounted
-  read-only into a `node:20-alpine` container — no second copy to maintain. Read
-  captured mail at `http://localhost:1080/__mailbox/messages`.
+- **provider-proxy** is this repo's own [`provider-proxy/provider-proxy.mjs`](provider-proxy/README.md) —
+  a zero-dependency provider proxy-mock, mounted read-only into a `node:20-alpine`
+  container (it needs no install). It sits in front of the API's transactional-email
+  provider: a client registers an expectation over the control plane at
+  `http://localhost:1080/__proxy/*` and reads the captured send (e.g. a verification
+  link) back out of `GET /__proxy/requests`. Unmatched mail goes to `PROXY_UPSTREAM_URL`,
+  which is **unset by default** so nothing can reach a real inbox — see
+  [`.env.example`](.env.example) to opt into forwarding to the real provider.
 
 ## Notes
 
