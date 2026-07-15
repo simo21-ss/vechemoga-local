@@ -57,7 +57,7 @@ urls() {
   echo "  web       → http://localhost:${WEB_PORT}   (admin.localhost:${WEB_PORT} · kid.localhost:${WEB_PORT})"
   echo "  api       → http://localhost:${API_PORT}   (health: /actuator/health · ping: /api/ping)"
   echo "  postgres  → localhost:${POSTGRES_PORT}      (db/user/pass: vechemoga · admin: admin@vechemoga.bg / admin)"
-  echo "  mailbox   → http://localhost:${MAIL_PORT}/__mailbox/messages"
+  echo "  mail proxy→ http://localhost:${MAIL_PORT}/__proxy/requests  (control plane: /__proxy/*)"
 }
 
 start_all() {
@@ -71,7 +71,7 @@ start_all() {
 
 start_infra() {
   dc up -d postgres mailserver
-  wait_for mailserver "http://localhost:${MAIL_PORT}/__mailbox/health"
+  wait_for mailserver "http://localhost:${MAIL_PORT}/__proxy/health"
   echo
   echo "  postgres  → localhost:${POSTGRES_PORT}   ·   mailserver → http://localhost:${MAIL_PORT}"
   echo "Now run the apps yourself (API from the IDE, web via 'npm run dev:compose')."

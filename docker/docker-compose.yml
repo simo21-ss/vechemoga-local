@@ -70,23 +70,25 @@ services:
       retries: 12
       start_period: 40s
 
-  # First-party, zero-dependency mail capture (Node's http only) - the same script
-  # the suite can also run on the host via `npm run mailserver`, mounted read-only so
-  # there is no second copy to keep in sync. It answers 200 to the API's send and
-  # remembers each message so a test (or you) can read the verification link back out
-  # at http://localhost:1080/__mailbox/messages.
+  # First-party, zero-dependency provider proxy-mock (Node's http only) - the same script
+  # the suite can also run on the host via `npm run proxy`, mounted read-only so there is
+  # no second copy to keep in sync. It sits in front of the API's transactional-email
+  # provider: unmatched traffic is proxied to PROXY_UPSTREAM_URL (unset here, so nothing
+  # leaves the box), and a test registers an expectation keyed on the recipient email via
+  # the control plane at http://localhost:1080/__proxy/* so it can read the verification
+  # link back out of the journal (GET /__proxy/requests).
   mailserver:
     image: 'node:20-alpine'
     working_dir: /app
-    command: ['node', 'mail-server.mjs']
+    command: ['node', 'provider-proxy.mjs']
     volumes:
-      - '../../VecheMogaAutomation/scripts/mail-server.mjs:/app/mail-server.mjs:ro'
+      - '../../VecheMogaAutomation/scripts/provider-proxy.mjs:/app/provider-proxy.mjs:ro'
     environment:
       - 'MAIL_MOCK_PORT=1080'
     ports:
       - '${MAIL_PORT:-1080}:1080'
     healthcheck:
-      test: ['CMD-SHELL', 'wget -q --spider http://localhost:1080/__mailbox/health || exit 1']
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:1080/__proxy/health || exit 1']
       interval: 10s
       timeout: 5s
       retries: 6
@@ -95,8 +97,15 @@ services:
   # The Next.js app, built from its own repo's Dockerfile (runs `next dev` with the
   # env.local profile). No depends_on: the web app starts independently and tolerates
   # the API not being ready yet, which keeps the `no-api` subset (web only, API from
-  # the IDE) working. The browser reaches the API at localhost:8080 (baked into
-  # env.local); server-side render reaches it at api:8080 via API_INTERNAL_BASE_URL.
+  # the IDE) working.
+  #
+  # The browser never talks to the API directly here: env.local leaves the public base
+  # URL empty, so client calls go same-origin to /api/* on whichever host the page is
+  # on (localhost / admin.localhost / kid.localhost) and Next proxies them to
+  # API_INTERNAL_BASE_URL. That is what lets the admin/kid subdomains authenticate -
+  # each *.localhost is its own site, so a direct call to localhost:8080 would be
+  # cross-site and the API's SameSite=Lax cookies would be dropped. Server-side render
+  # uses the same origin.
   web:
     build:
       context: ../../VecheMogaWeb
