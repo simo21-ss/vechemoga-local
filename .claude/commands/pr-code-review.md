@@ -1,0 +1,104 @@
+---
+description: Thin triage + approved-fix-plan layer over the built-in /code-review. Delegates the actual reviewing to /code-review (no posting, no auto-fix), then you confirm which findings are proper and it produces a fix plan for your approval.
+argument-hint: "[low|medium|high|max] [<PR number>]   (default: high, current branch)"
+allowed-tools: Skill, Bash(git status:*), Bash(git diff:*), Bash(git log:*), Read, Grep, Glob
+---
+
+# /pr-code-review
+
+A thin layer over the built-in **`/code-review`**. It lets `/code-review` do the actual reviewing (it's deeper and Anthropic-maintained), then adds the workflow you want on top:
+
+1. **You confirm which findings are proper** (per-finding Yes / No / Edit).
+2. The confirmed findings become a **fix plan you approve**.
+
+It **never posts to GitHub** and never auto-applies fixes.
+
+## Invocation
+
+Raw input is `$ARGUMENTS`. Extract, in any order:
+
+- An **effort** token — `low` | `medium` | `high` | `max`. Default `high`.
+- An optional **PR number** (`^\d+$`) — passed through to `/code-review`. No PR number → the current branch / worktree diff.
+- Any other token → refuse with `Usage: /pr-code-review [low|medium|high|max] [<PR number>]`.
+
+`ultra` is **not** run by this command — it's a billed, user-triggered cloud review. For ultra depth, run `/code-review ultra [<PR#>]` yourself first, then invoke `/pr-code-review` and it will triage those existing findings (see *Using an existing review*).
+
+## Phase 1 — generate findings via `/code-review`
+
+Invoke the built-in **`code-review`** skill (via the Skill tool) at the chosen effort, **without `--comment` and without `--fix`** — we want only its findings, not posting or auto-applying:
+
+- current branch → `code-review <effort>`
+- a PR → `code-review <effort> <PR number>`
+
+Let it run to completion and produce its findings in the conversation. Treat each reported finding (file, line, severity, description) as a **candidate** for triage. Do not let it post comments or modify files.
+
+If `/code-review` reports nothing → print `No issues found by /code-review.` and stop.
+
+### Using an existing review
+
+If the conversation **already** contains a fresh `/code-review` result (e.g. you just ran `/code-review ultra`), skip Phase 1 and triage those findings directly instead of running a new review.
+
+## Phase 2 — confirm which findings are proper
+
+For each candidate finding, in order, call `AskUserQuestion`:
+
+- `question`:
+  ```
+  [<severity>] <path>:<line>
+
+  <finding description>
+
+  Is this a proper finding?
+  ```
+  (omit `:line` for a change-level finding)
+- `header`: `Finding <i>/<N>`
+- `options`:
+  - `{ label: "Yes — valid", description: "Keep it; goes into the fix plan" }`
+  - `{ label: "No — drop", description: "Not a real issue; discard" }`
+  - `{ label: "Edit", description: "Refine the finding before keeping it" }`
+
+**Yes** → push onto `CONFIRMED`. **No** → drop. **Edit** → follow-up `AskUserQuestion` whose `Other` free-text field holds the rewrite (`Cancel` → drop), then keep. A full cancel maps all remaining findings to dropped.
+
+When judging a finding, weigh it against the repo's conventions — [CLAUDE.md](../../CLAUDE.md), [README.md](../../README.md) and [provider-proxy/README.md](../../provider-proxy/README.md) are the source of truth (this repo has no `.claude/skills/`; the sibling app repos do). Don't keep a finding that contradicts an established convention here. **Deliberate choices a general reviewer tends to flag wrongly:**
+
+- **`PROXY_UPSTREAM_URL` unset by default** — unmatched provider traffic 502s on purpose so it can never reach a real inbox. "The proxy has no upstream configured" is the intended state, not a gap. Conversely, *do* keep a finding that would make real mail reachable by default, or that leans on the empty `LOOPS_API_KEY` as the safety net (it only turns a leaked send into a 401).
+- **`provider-proxy/` is dependency-free on purpose** — no `package.json`, no npm, Node built-ins only, tests on `node --test`. Don't keep "add a test framework / a package.json / an HTTP library". That zero-dep property is what lets stock `node:20-alpine` run it from a read-only bind mount.
+- **A single `.mjs` bind-mounted into a stock image** rather than a built image — intentional; there is nothing to install.
+- **`JAVA_OPTS` `-D` properties instead of env vars** for the API's mail config — deliberate; relaxed binding mangles `base-url`.
+- **The web healthcheck accepting any HTTP status** — the apex homepage 500s until a CMS page exists, so a status-strict probe would wrongly mark the app down.
+- **No Dockerfiles here** — they live in the app repos; this repo only composes.
+- **Cross-repo build contexts** (`../../VecheMogaApi`, `../../VecheMogaWeb`) and the required side-by-side layout — by design.
+
+Do keep findings about things that silently break a developer: a compose/`run.sh` mismatch (a probe or printed URL that disagrees with the published port), a bind mount whose source doesn't exist (Docker silently creates an empty directory and the container serves stale code), a service rename that orphans a container still holding a port, or docs that contradict the stack.
+
+## Phase 3 — fix plan + approval
+
+If `CONFIRMED` is empty → print `No findings confirmed; nothing to plan.` and stop.
+
+1. **Build the plan.** Turn every confirmed finding into an actionable, ordered fix plan:
+   - Group by file / area; within a group order `blocker`/high → `issue` → `nit`.
+   - Each step states **what to change, where (`path:line`), and why** (one line), with the concrete approach — and the convention it restores when relevant.
+   - Call out ordering / dependencies, and any single change that resolves several findings at once.
+   - Flag any fix that also needs a **contract test** (`provider-proxy/test/`), a **docs update** ([README.md](../../README.md), [.env.example](../../.env.example), [provider-proxy/README.md](../../provider-proxy/README.md)), or a **companion PR in a sibling repo** — `VecheMogaAutomation`'s CI checks this repo out to run the proxy, and its `MailboxClient` codes against the `/__proxy/*` contract, so a change to the proxy or the compose can break it.
+   - Note when a fix changes something a running stack holds: a service name, a published port, or the API's provider base URL.
+2. **Present** the plan as a clear numbered list in plain text (not a code block).
+3. **Get approval** via `AskUserQuestion`:
+   - `question`: `Approve this fix plan for <N> findings?`
+   - `header`: `Approve plan`
+   - `options`:
+     - `{ label: "Approve", description: "Plan is good" }`
+     - `{ label: "Revise", description: "I'll say what to change in the plan" }`
+     - `{ label: "Cancel", description: "Discard the plan; change nothing" }`
+   - **Revise** → take free-text feedback, adjust, re-present, re-ask (cap 2 rounds). **Cancel** → stop; nothing changes.
+4. **On Approve** → restate the final approved plan once, then ask via `AskUserQuestion`: `Implement the approved plan now?` → `{ label: "Yes, implement" }` / `{ label: "No, just leave the plan" }`.
+   - **Yes** → implement the fixes following the plan and the repo conventions ([CLAUDE.md](../../CLAUDE.md)). Edits touch the working tree only. After, run `docker compose -f docker/docker-compose.yml config -q`, `bash -n docker/run.sh`, and `cd provider-proxy && node --test test/` as applicable — and for anything touching the compose, the proxy or `run.sh`, **verify behaviourally**: `./run.sh up` and a mailbox scenario from `VecheMogaAutomation` actually capturing a token. Static checks alone don't prove this stack works.
+   - **No** → stop; the approved plan is the deliverable.
+
+## Guardrails
+
+- **This is only a triage + plan layer.** All review generation is delegated to `/code-review`; this command does not maintain its own review checklist (the docs above supply the *conventions* to weigh findings against, not a parallel review pass).
+- **Never pass `--comment` or `--fix` to `/code-review`.** No PR comments, no auto-applied fixes from the review step.
+- **Never post to GitHub** and **never commit or push.** Even after approval, implementation edits the working tree only — committing/pushing is a separate, explicit step.
+- **Don't auto-launch `ultra`** (billed, user-triggered). Use low/medium/high/max, or triage a review the user ran themselves.
+- **Explicit triage.** Every finding needs an explicit Yes / No / Edit — never bulk-accept on the user's behalf.
+- **Plan needs approval.** No implementation happens until you approve the plan and opt to implement.

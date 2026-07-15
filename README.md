@@ -112,9 +112,13 @@ with the stack out of the box. The suite **never** targets production.
   on via `JAVA_OPTS` `-D` properties: `vechemoga.email.enabled=true` +
   `vechemoga.email.loops.base-url=http://provider-proxy:1080`.
 - **Web** runs `next dev` with its committed `env.local` profile (same as
-  `npm run dev:compose`). The **browser** calls the API at `localhost:8080` (baked
-  into `env.local`); **server-side** rendering calls it at `api:8080` via the
-  server-only `API_INTERNAL_BASE_URL` (see `VecheMogaWeb/src/lib/api/base.ts`).
+  `npm run dev:compose`). The **browser never calls the API directly**: `env.local`
+  leaves `NEXT_PUBLIC_API_BASE_URL` empty, so client calls go same-origin to `/api/*`
+  on whichever host the page is on and Next's rewrite proxies them to the server-only
+  `API_INTERNAL_BASE_URL` (the compose sets `http://api:8080`). That is what lets the
+  `admin.`/`kid.localhost` subdomains authenticate — each `*.localhost` is its own
+  site, so a direct call to `localhost:8080` would be cross-site and the API's
+  `SameSite=Lax` cookies would be dropped. Server-side rendering uses the same origin.
 - **provider-proxy** is this repo's own [`provider-proxy/provider-proxy.mjs`](provider-proxy/README.md) —
   a zero-dependency provider proxy-mock, mounted read-only into a `node:20-alpine`
   container (it needs no install). It sits in front of the API's transactional-email
