@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The local-development hub for **Veche Moga** (vechemoga.bg): one Docker Compose stack that runs the whole
 product on a developer's machine, plus the provider proxy-mock the automation suite needs. Docker Compose ·
-Bash · Node 20 (the proxy only). **No application code lives here** — the app Dockerfiles live in their own
-repos and this repo only *composes* them.
+Bash. **No source code lives here at all** — the app Dockerfiles live in their own repos, the provider-proxy
+is a released image from its own repo, and this repo only *composes* them.
 
 ## Layout on disk (required)
 
@@ -22,7 +22,8 @@ VecheMoga/
 
 ## Commands
 
-Requires **Docker Desktop** (Compose v2). Node 20+ only to run the proxy or its tests outside Docker.
+Requires **Docker Desktop** (Compose v2), plus a one-time ECR login for the provider-proxy image pull
+(the `vechemoga-ops` CLI profile; `run.sh` prints the one-liner if the pull fails — cached image = offline).
 
 ```bash
 cd docker
@@ -40,7 +41,6 @@ Checks (there is no build or test suite for the stack itself):
 ```bash
 docker compose -f docker/docker-compose.yml config -q   # compose parses + interpolates
 bash -n docker/run.sh                                   # run.sh syntax
-cd provider-proxy && node --test test/                  # the proxy's contract test (no install)
 ```
 
 The real check is behavioural: `./run.sh up`, then run the suite against it
@@ -75,12 +75,14 @@ the `admin.`/`kid.localhost` subdomains authenticate: each `*.localhost` is its 
 overrides `API_INTERNAL_BASE_URL` to `host.docker.internal:8080` so a containerised web still reaches an
 IDE-run API.
 
-**[`provider-proxy/`](provider-proxy/README.md) is this repo's only source code** — a zero-dependency proxy-mock
-(Node built-ins only) for the API's outbound HTTP providers: Loops, for both transactional mail and ESP contact
-sync. It runs as the `provider-proxy` service and is the API's provider base URL for the whole stack, tests or
-not. A client registers an expectation over the HTTP control plane (`/__proxy/*`) and reads the captured send back
-out. Its contract is documented in [provider-proxy/README.md](provider-proxy/README.md) and pinned by
-`node --test test/`.
+**The provider-proxy is a pulled release image, not source in this repo.** It is a zero-dependency proxy-mock
+for the API's outbound HTTP providers (Loops, for both transactional mail and ESP contact sync) that runs as the
+`provider-proxy` service and is the API's provider base URL for the whole stack, tests or not. A client registers
+an expectation over the HTTP control plane (`/__proxy/*`) and reads the captured send back out. Its source,
+control-plane contract, and contract tests live in
+[`vechemoga-provider-proxy`](https://github.com/simo21-ss/vechemoga-provider-proxy) — **proxy changes happen
+there, never here**; its AWS pipeline pushes `:<sha12>` (immutable) and `:latest` (moving) to ECR
+(`776051122865.dkr.ecr.eu-central-1.amazonaws.com/vechemoga/provider-proxy`) on every merge to its main.
 
 - **`PROXY_UPSTREAM_URL` is unset by default, deliberately** — with no upstream there is *no code path* from a
   dev machine to a real inbox, which is what lets the profile point the real Loops clients here. Unmatched
@@ -93,13 +95,16 @@ out. Its contract is documented in [provider-proxy/README.md](provider-proxy/REA
   are their only bounds.
 - **`PROXY_PORT` means the host port only.** The container keeps the script's own 1080 default (no port var is
   passed in), so one name never means two things.
-- Mounted **read-only into stock `node:20-alpine`**: the script needs no install, so the stack builds no image.
-  `provider-proxy/Dockerfile` exists only for deploying it where this source isn't checked out; the compose
-  doesn't use it.
+- **The image is private ECR** — the first pull (and any tag update) needs a one-time login with the
+  `vechemoga-ops` CLI profile; `run.sh` prints the exact one-liner when an unauthenticated pull fails, and
+  deliberately never runs `aws` itself: once the image is cached locally, the stack must work fully offline.
+  `PROVIDER_PROXY_IMAGE`/`PROVIDER_PROXY_TAG` in `.env` override the default `:latest` — pin a `<sha12>` to
+  reproduce an exact proxy build.
 
 **Test suites are clients, not owners.** `VecheMogaAutomation` talks to the proxy over HTTP and depends on
-nothing here but `MAIL_MOCK_URL`. Its CI checks this repo out to run the proxy, so **a change to the proxy or
-the compose can break that repo's pipeline** — check whether a change needs a companion PR there.
+nothing here but `MAIL_MOCK_URL`. Its CI runs the proxy from the `vechemoga-provider-proxy` checkout, not from
+this repo — but **a change to the compose or `run.sh` can still break that repo's pipeline**; check whether a
+change needs a companion PR there.
 
 **`run.sh` reads `.env` itself.** Compose gets the same file via `--env-file`, but that only feeds *its*
 interpolation; without run.sh reading it too, a port overridden in `.env` would move the container while
@@ -109,8 +114,11 @@ passes `--remove-orphans` so a renamed service can't leave its old container hol
 ## Conventions
 
 - Do not add `Co-Authored-By` trailers or any Claude/Anthropic references to commit messages.
-- **Keep `provider-proxy/` dependency-free** — no `package.json`, no npm install, Node built-ins only. That is
-  what lets the stock node image run it from a read-only bind mount and the tests run with no setup.
-- Keep the docs in sync with the stack in the same change: [README.md](README.md), [.env.example](.env.example),
-  and [provider-proxy/README.md](provider-proxy/README.md) (the control-plane contract other repos code against).
+- **This repo carries no proxy source.** The proxy is owned by
+  [`vechemoga-provider-proxy`](https://github.com/simo21-ss/vechemoga-provider-proxy): changes to its behaviour
+  or its `/__proxy/*` contract happen there, its pipeline releases the image, and this repo only picks the tag.
+  Never re-vendor the script here.
+- Keep the docs in sync with the stack in the same change: [README.md](README.md) and
+  [.env.example](.env.example). The control-plane contract other repos code against is documented in the
+  `vechemoga-provider-proxy` repo.
 - This is **local only**. Production deployment lives in `VecheMogaApi/deploy/` (API) and Amplify (web).

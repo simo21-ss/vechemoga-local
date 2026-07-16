@@ -66,12 +66,17 @@ services:
       retries: 12
       start_period: 40s
 
-  # First-party, zero-dependency provider proxy-mock (Node's http only), owned by this repo
-  # (../provider-proxy - see its README for the control plane). It stands in for the API's
-  # outbound HTTP providers (Loops, for both transactional email and ESP contact sync) for
-  # the whole stack, tests or not: a client registers an expectation keyed on the recipient
-  # email via the control plane at http://localhost:1080/__proxy/* and reads the verification
-  # link back out of the journal (GET /__proxy/requests).
+  # Provider proxy-mock (Loops stand-in for both transactional email and ESP contact sync),
+  # pulled as a released image. The source, contract test, and the AWS pipeline that
+  # publishes this image live in their own repo - github.com/simo21-ss/vechemoga-provider-proxy
+  # (sibling checkout: ../../VecheMogaProviderProxy); proxy changes happen there, never here.
+  # Every merge to its main pushes :<sha12> (immutable, per commit) and :latest (moving).
+  # The first pull (and any tag update) needs a one-time ECR login - run.sh prints the
+  # one-liner when the pull fails unauthenticated; once cached, `up` works fully offline.
+  #
+  # It stands in for the API's outbound HTTP providers for the whole stack, tests or not:
+  # a client registers an expectation via the control plane at http://localhost:1080/__proxy/*
+  # and reads the verification link back out of the journal (GET /__proxy/requests).
   #
   # PROXY_UPSTREAM_URL is deliberately EMPTY by default, and that is what makes it safe for
   # the `local` profile to run the REAL Loops clients against this: with no upstream, there
@@ -79,29 +84,17 @@ services:
   # rather than forwarded. That also makes the ESP poller, which registers no expectation for
   # its 60s sweep, a clean no-op instead of a pile of failures.
   # Set it in .env (see ../.env.example) to https://app.loops.so/api to opt into passthrough.
-  # Mounted read-only: the script needs no install, so the stock node image runs it as-is
-  # (../provider-proxy/Dockerfile exists for deploying it elsewhere, and is unused here).
   provider-proxy:
-    # Same digest as ../provider-proxy/Dockerfile, so the proxy you run here and the proxy
-    # built from that file are the same Node. Refresh both together:
-    #   docker buildx imagetools inspect node:20-alpine
-    image: 'node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293'
-    working_dir: /app
-    command: ['node', 'provider-proxy.mjs']
-    volumes:
-      - '../provider-proxy/provider-proxy.mjs:/app/provider-proxy.mjs:ro'
+    # Pin PROVIDER_PROXY_TAG to a :<sha12> in .env to reproduce an exact proxy build.
+    image: '${PROVIDER_PROXY_IMAGE:-776051122865.dkr.ecr.eu-central-1.amazonaws.com/vechemoga/provider-proxy}:${PROVIDER_PROXY_TAG:-latest}'
     environment:
       - 'PROXY_UPSTREAM_URL=${PROXY_UPSTREAM_URL:-}'
     ports:
       # Inside the container the proxy always listens on its default 1080 (no PROXY_PORT is
       # passed in), so PROXY_PORT here only remaps the HOST side - one name, one meaning.
       - '${PROXY_PORT:-1080}:1080'
-    healthcheck:
-      test: ['CMD-SHELL', 'wget -q --spider http://localhost:1080/__proxy/health || exit 1']
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 5s
+    # No healthcheck block: the image ships its own HEALTHCHECK (wget on /__proxy/health),
+    # and that is what api's `depends_on: condition: service_healthy` consumes.
 
   # The Next.js app, built from its own repo's Dockerfile (runs `next dev` with the
   # env.local profile). No depends_on: the web app starts independently and tolerates

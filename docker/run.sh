@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 
-# Read ONE port key out of .env, or nothing if it isn't there. Compose gets the whole file
+# Read ONE key out of .env, or nothing if it isn't there. Compose gets the whole file
 # via --env-file below and owns everything in it; this only recovers the handful of values
 # run.sh needs for its own probes and printed URLs, so a key like COMPOSE_PROJECT_NAME can
 # never reach Compose through our environment. Nothing is exported for the same reason.
@@ -28,7 +28,7 @@ COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 # unquoted trailing `# comment` is dropped. Anything fancier (escapes, multi-line values)
 # is Compose's business - `dc port` below is what we actually trust once containers exist,
 # so this only has to be right enough to name a port before then.
-env_port() { # key -> value from .env, else empty
+env_val() { # key -> value from .env, else empty
   local key="$1" line value
   [[ -f "$ROOT_DIR/.env" ]] || return 0
   line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ROOT_DIR/.env" | tail -1)" || return 0
@@ -45,10 +45,17 @@ env_port() { # key -> value from .env, else empty
 }
 
 # Shell env wins over .env, matching Compose's precedence (shell env > --env-file).
-WEB_PORT="${WEB_PORT:-$(env_port WEB_PORT)}";           WEB_PORT="${WEB_PORT:-3000}"
-API_PORT="${API_PORT:-$(env_port API_PORT)}";           API_PORT="${API_PORT:-8080}"
-POSTGRES_PORT="${POSTGRES_PORT:-$(env_port POSTGRES_PORT)}"; POSTGRES_PORT="${POSTGRES_PORT:-5432}"
-PROXY_PORT="${PROXY_PORT:-$(env_port PROXY_PORT)}";     PROXY_PORT="${PROXY_PORT:-1080}"
+WEB_PORT="${WEB_PORT:-$(env_val WEB_PORT)}";           WEB_PORT="${WEB_PORT:-3000}"
+API_PORT="${API_PORT:-$(env_val API_PORT)}";           API_PORT="${API_PORT:-8080}"
+POSTGRES_PORT="${POSTGRES_PORT:-$(env_val POSTGRES_PORT)}"; POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+PROXY_PORT="${PROXY_PORT:-$(env_val PROXY_PORT)}";     PROXY_PORT="${PROXY_PORT:-1080}"
+
+# The provider-proxy is a pulled release image (see docker-compose.yml). These mirror the
+# compose defaults only so the ECR hint below can name the exact image `up` tried to get.
+PROVIDER_PROXY_IMAGE="${PROVIDER_PROXY_IMAGE:-$(env_val PROVIDER_PROXY_IMAGE)}"
+PROVIDER_PROXY_IMAGE="${PROVIDER_PROXY_IMAGE:-776051122865.dkr.ecr.eu-central-1.amazonaws.com/vechemoga/provider-proxy}"
+PROVIDER_PROXY_TAG="${PROVIDER_PROXY_TAG:-$(env_val PROVIDER_PROXY_TAG)}"
+PROVIDER_PROXY_TAG="${PROVIDER_PROXY_TAG:-latest}"
 
 # Prefer the Compose v2 plugin; fall back to the legacy binary.
 if docker compose version >/dev/null 2>&1; then
@@ -83,6 +90,28 @@ sync_ports_from_compose() {
   done
 }
 
+# When `up` fails AND the proxy image is not in the local cache, the likeliest cause is an
+# unauthenticated ECR pull (the image is private; login is needed once, and again for tag
+# updates). Point at the one-liner instead of leaving a bare compose error. Deliberately no
+# automatic `aws` call: once the image is cached, the whole stack must keep working offline.
+up_or_hint() {
+  "$@" && return 0
+  local status=$?
+  if ! docker image inspect "${PROVIDER_PROXY_IMAGE}:${PROVIDER_PROXY_TAG}" >/dev/null 2>&1; then
+    cat >&2 <<EOF
+
+If the failure above is the provider-proxy pull (401/403/no basic auth credentials):
+the image is private ECR and needs a one-time login (also after 'clean' or a tag change):
+
+  aws ecr get-login-password --region eu-central-1 --profile vechemoga-ops \\
+    | docker login --username AWS --password-stdin 776051122865.dkr.ecr.eu-central-1.amazonaws.com
+
+Then re-run this command. Once the image is cached locally, the stack runs fully offline.
+EOF
+  fi
+  return "$status"
+}
+
 wait_for() { # name url
   local name="$1" url="$2" i
   printf 'Waiting for %s (%s) ' "$name" "$url"
@@ -106,7 +135,7 @@ urls() {
 # container behind holding :1080. Services that are merely not part of this subset are still
 # defined in the file, so they are untouched.
 start_all() {
-  dc up -d --build --remove-orphans
+  up_or_hint dc up -d --build --remove-orphans
   sync_ports_from_compose
   wait_for api "http://localhost:${API_PORT}/actuator/health"
   urls
@@ -116,7 +145,7 @@ start_all() {
 }
 
 start_infra() {
-  dc up -d --remove-orphans postgres provider-proxy
+  up_or_hint dc up -d --remove-orphans postgres provider-proxy
   sync_ports_from_compose
   wait_for provider-proxy "http://localhost:${PROXY_PORT}/__proxy/health"
   echo
@@ -127,14 +156,15 @@ start_infra() {
 start_no_api() {
   # Web + provider-proxy in containers, API from your IDE on the host. Point the web's
   # SSR at the host so server-rendered pages still reach the IDE-run API.
-  API_INTERNAL_BASE_URL="http://host.docker.internal:${API_PORT}" dc up -d --build --remove-orphans --scale api=0
+  API_INTERNAL_BASE_URL="http://host.docker.internal:${API_PORT}" \
+    up_or_hint dc up -d --build --remove-orphans --scale api=0
   sync_ports_from_compose
   urls
   echo "API is NOT running - start it from your IDE (bootRun) on :${API_PORT}."
 }
 
 start_no_web() {
-  dc up -d --build --remove-orphans --scale web=0
+  up_or_hint dc up -d --build --remove-orphans --scale web=0
   sync_ports_from_compose
   wait_for api "http://localhost:${API_PORT}/actuator/health"
   urls

@@ -22,12 +22,13 @@ VecheMoga/
     │   ├── docker-compose.yml   the stack: postgres, api, web, provider-proxy
     │   ├── run.sh               interactive menu + non-interactive commands
     │   ├── stop.sh / clean.sh / showServiceNames.sh
-    ├── provider-proxy/          source of the `provider-proxy` service (zero-dependency)
-    │   ├── provider-proxy.mjs   proxy-mock for the API's outbound providers (mail + ESP)
-    │   ├── Dockerfile           for running it elsewhere; the stack bind-mounts instead
-    │   └── test/                its contract test (`node --test test/`)
-    └── .env.example             optional port/credential/upstream overrides
+    └── .env.example             optional port/credential/upstream/proxy-version overrides
 ```
+
+The `provider-proxy` service is **not** built from this repo: it is a released Docker
+image pulled from ECR, owned by
+[`vechemoga-provider-proxy`](https://github.com/simo21-ss/vechemoga-provider-proxy)
+(source, control-plane contract, tests, and the AWS pipeline that publishes the image).
 
 ## Prerequisites
 
@@ -37,8 +38,14 @@ VecheMoga/
 ## Quick start
 
 ```bash
+# One-time: log in to ECR so the provider-proxy image can be pulled (needs the
+# vechemoga-ops CLI profile; needed again only after `clean` or a tag change —
+# once the image is cached locally, everything below works offline).
+aws ecr get-login-password --region eu-central-1 --profile vechemoga-ops \
+  | docker login --username AWS --password-stdin 776051122865.dkr.ecr.eu-central-1.amazonaws.com
+
 cd docker
-./run.sh up          # build + start postgres + api + web (detached)
+./run.sh up          # build + start postgres + api + web + provider-proxy (detached)
 ```
 
 Then:
@@ -50,7 +57,7 @@ Then:
 | Web — kid host | http://kid.localhost:3000 |
 | API | http://localhost:8080 (`/actuator/health`, `/api/ping`) |
 | Postgres | `localhost:5432` (db/user/pass: `vechemoga`) |
-| Provider proxy ([`provider-proxy/`](provider-proxy/README.md)) | http://localhost:1080 (control plane: `/__proxy/*`) |
+| Provider proxy ([`vechemoga-provider-proxy`](https://github.com/simo21-ss/vechemoga-provider-proxy)) | http://localhost:1080 (control plane: `/__proxy/*`) |
 
 `admin.localhost` / `kid.localhost` resolve to 127.0.0.1 automatically in
 Chrome/Safari/Edge — the Next app splits the hosts in `src/proxy.ts`.
@@ -120,9 +127,13 @@ with the stack out of the box. The suite **never** targets production.
   `admin.`/`kid.localhost` subdomains authenticate — each `*.localhost` is its own
   site, so a direct call to `localhost:8080` would be cross-site and the API's
   `SameSite=Lax` cookies would be dropped. Server-side rendering uses the same origin.
-- **provider-proxy** is this repo's own [`provider-proxy/provider-proxy.mjs`](provider-proxy/README.md) —
-  a zero-dependency provider proxy-mock, mounted read-only into a `node:20-alpine`
-  container (it needs no install). It stands in for the API's outbound providers: a client
+- **provider-proxy** is the released image of
+  [`vechemoga-provider-proxy`](https://github.com/simo21-ss/vechemoga-provider-proxy) —
+  a zero-dependency provider proxy-mock whose source, control-plane contract, and tests
+  live in that repo; its AWS pipeline pushes `:<sha12>` (immutable, per commit) and
+  `:latest` (moving) to ECR on every merge to main. This stack pulls `:latest` by default;
+  pin `PROVIDER_PROXY_TAG=<sha12>` in `.env` to reproduce a specific proxy version.
+  It stands in for the API's outbound providers: a client
   registers an expectation over the control plane at `http://localhost:1080/__proxy/*` and
   reads the captured send (e.g. a verification link) back out of `GET /__proxy/requests`.
   Traffic no expectation matched is **stubbed `200` and journaled**, so it is still readable

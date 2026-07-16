@@ -16,9 +16,9 @@ Steps:
 
 1. Confirm the target PR (number + title). If no open PR exists for the branch, say so and stop — do not guess.
 2. **Check for a companion PR before merging.** This repo is the hub: the compose builds from
-   `../../VecheMogaApi` and `../../VecheMogaWeb`, and `VecheMogaAutomation`'s CI checks *this* repo out to run
-   the provider proxy-mock against the `/__proxy/*` contract. If the PR touches
-   `provider-proxy/`, `docker/docker-compose.yml` or `docker/run.sh`, ask whether a sibling PR has to land with
+   `../../VecheMogaApi` and `../../VecheMogaWeb`, and `VecheMogaAutomation`'s suite targets this stack's
+   published ports (the proxy itself is owned by `vechemoga-provider-proxy`). If the PR touches
+   `docker/docker-compose.yml` or `docker/run.sh`, ask whether a sibling PR has to land with
    it (`gh pr list --repo simo21-ss/vechemoga-automation` to check). Merging one side alone can leave the
    other's pipeline red. If there is a companion, merge this one **first** — the sibling depends on this repo's
    contents, not the reverse — then tell the user to land the other.
