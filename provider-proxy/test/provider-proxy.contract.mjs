@@ -5,6 +5,12 @@
 // MailboxClient (and any future client) is written against. A fake upstream stands in for
 // the real provider, so passthrough is proven without sending real email.
 //
+// Two instances, because PROXY_UPSTREAM_URL is read once at startup and the two modes are
+// genuinely different contracts:
+//   - the main proxy, WITH an upstream → unmatched is forwarded (opt-in passthrough);
+//   - the stub proxy, WITHOUT one → unmatched is stubbed + journaled. This is the off-prod
+//     shape, the one the real Loops clients point at.
+//
 // The property that matters most for parallel Cucumber runs: concurrent scenarios with
 // DISTINCT unique keys never cross-contaminate.
 //
@@ -37,13 +43,14 @@ function freePort() {
   });
 }
 
-let proxy;
 let upstream;
 const upstreamHits = [];
+/** Every proxy child spawned, so after() can reap them all. */
+const spawned = [];
 
 /** Simulate the API POSTing a transactional email to its (proxied) provider base URL. */
-function appSends(email, token) {
-  return fetch(`${PROXY_URL}/v1/transactional`, {
+function appSends(email, token, base = PROXY_URL) {
+  return fetch(`${base}/v1/transactional`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -57,8 +64,8 @@ function appSends(email, token) {
 // The same calls MailboxClient makes, inlined so this repo owns no test-suite code.
 
 /** Register an expectation keyed on the recipient; returns its id. */
-async function expectMail(email) {
-  const res = await fetch(`${PROXY_URL}/__proxy/expectations`, {
+async function expectMail(email, base = PROXY_URL) {
+  const res = await fetch(`${base}/__proxy/expectations`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ method: "POST", path: "/v1/transactional", bodyMatch: { email } }),
@@ -67,12 +74,22 @@ async function expectMail(email) {
   return (await res.json()).id;
 }
 
-async function clearExpectation(id) {
-  await fetch(`${PROXY_URL}/__proxy/expectations/${id}`, { method: "DELETE" });
+async function clearExpectation(id, base = PROXY_URL) {
+  await fetch(`${base}/__proxy/expectations/${id}`, { method: "DELETE" });
 }
 
-async function journalByExpectation(id) {
-  const res = await fetch(`${PROXY_URL}/__proxy/requests?expectationId=${encodeURIComponent(id)}`);
+async function journalByExpectation(id, base = PROXY_URL) {
+  const res = await fetch(`${base}/__proxy/requests?expectationId=${encodeURIComponent(id)}`);
+  return res.json();
+}
+
+/** Read the journal by a body field — the only way to find a stubbed capture, which has
+ *  no expectation id to scope by. */
+async function journalByBody(bodyPath, bodyValue, base = PROXY_URL) {
+  const res = await fetch(
+    `${base}/__proxy/requests?bodyPath=${encodeURIComponent(bodyPath)}&bodyValue=${encodeURIComponent(bodyValue)}`
+  );
+  assert.equal(res.status, 200);
   return res.json();
 }
 
@@ -103,6 +120,43 @@ function ensureUp() {
   return booted;
 }
 
+/** Spawn one proxy child on a free port and wait for it to answer /__proxy/health.
+ *  `env` is the ONLY source of the proxy's own config: the inherited environment is
+ *  scrubbed of both proxy vars first, so a developer's exported PROXY_UPSTREAM_URL can't
+ *  quietly turn the stub-mode instance into a passthrough one and pass these tests. */
+async function spawnProxy(env = {}) {
+  const port = await freePort();
+  const url = `http://localhost:${port}`;
+  const childEnv = { ...process.env, PROXY_PORT: String(port) };
+  delete childEnv.PROXY_UPSTREAM_URL;
+  delete childEnv.PROXY_JOURNAL_MAX;
+  Object.assign(childEnv, env);
+
+  const child = spawn("node", ["provider-proxy.mjs"], {
+    cwd: MAIL_PROXY_DIR,
+    env: childEnv,
+    stdio: "ignore",
+  });
+  spawned.push(child);
+  let spawnErr;
+  child.on("error", (e) => {
+    spawnErr = e; // record, don't throw in an emitter — surface it below so the caller rejects cleanly
+  });
+
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (spawnErr) throw spawnErr;
+    if (child.exitCode !== null) throw new Error(`proxy exited early with code ${child.exitCode}`);
+    try {
+      if ((await fetch(`${url}/__proxy/health`)).ok) return url; // our child is listening -> stays up
+    } catch {
+      /* not up yet */
+    }
+    await sleep(100);
+  }
+  throw new Error("proxy did not become healthy");
+}
+
 async function boot() {
   upstream = http.createServer((req, res) => {
     const chunks = [];
@@ -123,34 +177,21 @@ async function boot() {
   });
   const upstreamUrl = `http://localhost:${upstream.address().port}`;
 
-  const proxyPort = await freePort();
-  PROXY_URL = `http://localhost:${proxyPort}`;
-  proxy = spawn("node", ["provider-proxy.mjs"], {
-    cwd: MAIL_PROXY_DIR,
-    env: { ...process.env, PROXY_PORT: String(proxyPort), PROXY_UPSTREAM_URL: upstreamUrl },
-    stdio: "ignore",
-  });
-  let spawnErr;
-  proxy.on("error", (e) => {
-    spawnErr = e; // record, don't throw in an emitter — surface it below so boot() rejects cleanly
-  });
+  PROXY_URL = await spawnProxy({ PROXY_UPSTREAM_URL: upstreamUrl });
+}
 
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (spawnErr) throw spawnErr;
-    if (proxy.exitCode !== null) throw new Error(`proxy exited early with code ${proxy.exitCode}`);
-    try {
-      if ((await fetch(`${PROXY_URL}/__proxy/health`)).ok) return; // our child is listening -> stays up
-    } catch {
-      /* not up yet */
-    }
-    await sleep(100);
-  }
-  throw new Error("proxy did not become healthy");
+// The stub-mode instance: no upstream, so unmatched traffic is stubbed + journaled. Booted
+// on demand and separately from the main one, and given its own journal, so these
+// assertions never race the passthrough tests' traffic.
+let stubBooted;
+let STUB_URL = "";
+function ensureStubUp() {
+  if (!stubBooted) stubBooted = spawnProxy().then((url) => (STUB_URL = url));
+  return stubBooted;
 }
 
 after(() => {
-  proxy?.kill();
+  for (const child of spawned) child.kill();
   upstream?.close();
 });
 
@@ -313,4 +354,92 @@ test("clearing all expectations resets both planes", async () => {
   const before = upstreamHits.length;
   await appSends(email, "tok-AFTER-RESET");
   assert.equal(upstreamHits.length, before + 1, "cleared expectation must not keep matching");
+});
+
+// ---- Stub mode: no upstream ------------------------------------------------
+// The off-prod contract. The real Loops clients point here, so an unmatched request is
+// every send nobody registered an expectation for — including the ESP poller sweeping
+// every contact every 60s. It must succeed and be recorded, never fail and never leave.
+
+test("no upstream: unmatched is stubbed 200, not a 502", async () => {
+  await ensureStubUp();
+  const res = await appSends(`stub.a+${rand()}@test.local`, "tok-STUB", STUB_URL);
+
+  assert.equal(res.status, 200, "an unmatched send must succeed — a 502 makes the ESP poller retry to abandonment");
+  assert.deepEqual(await res.json(), { success: true }, "the stub body is what the provider clients expect");
+});
+
+// Retires the expect()-before-send footgun: the send happens first, with nothing
+// registered, and is still readable afterwards.
+test("no upstream: unmatched is journaled and readable by bodyPath after the fact", async () => {
+  await ensureStubUp();
+  const email = `stub.b+${rand()}@test.local`;
+  await appSends(email, "tok-AFTER-THE-FACT", STUB_URL);
+
+  const entries = await journalByBody("email", email, STUB_URL);
+  assert.equal(entries.length, 1, "the unmatched send must be recorded even with no expectation registered");
+  assert.equal(tokenOf(entries[0]), "tok-AFTER-THE-FACT", "and its body must be readable back out");
+  assert.equal(entries[0].matchedExpectationId, null, "nothing claimed it, so it carries no expectation id");
+});
+
+test("no upstream: unmatched never reaches the real provider", async () => {
+  await ensureStubUp();
+  const email = `stub.c+${rand()}@test.local`;
+  const before = upstreamHits.length;
+  const body = await (await appSends(email, "tok-NO-LEAK", STUB_URL)).json();
+
+  assert.equal(upstreamHits.length, before, "with no upstream configured, nothing may leave");
+  assert.equal(body.from, undefined, "the response is the stub, not a provider's");
+  assert.equal(upstreamHits.find((h) => h.email === email), undefined, "the recipient must never be seen upstream");
+});
+
+test("no upstream: an expectation still wins over the stub", async () => {
+  await ensureStubUp();
+  const email = `stub.d+${rand()}@test.local`;
+  const id = await expectMail(email, STUB_URL);
+  await appSends(email, "tok-EXPECTED", STUB_URL);
+
+  const entries = await journalByExpectation(id, STUB_URL);
+  assert.equal(entries.length, 1, "a matched send is claimed by its expectation, not stubbed");
+  assert.equal(tokenOf(entries[0]), "tok-EXPECTED");
+  assert.equal(entries[0].matchedExpectationId, id, "and is tagged, so a parallel suite can scope to it");
+
+  await clearExpectation(id, STUB_URL);
+});
+
+// Stubbed entries have no expectation id, so disposal can't prune them. DELETE
+// /__proxy/requests is their reset — worth pinning, since it and PROXY_JOURNAL_MAX are
+// the only two things bounding them.
+test("no upstream: stubbed captures survive expectation disposal, and DELETE /requests is their reset", async () => {
+  await ensureStubUp();
+  const email = `stub.e+${rand()}@test.local`;
+  const id = await expectMail(`stub.e.other+${rand()}@test.local`, STUB_URL);
+  await appSends(email, "tok-UNPRUNABLE", STUB_URL); // unmatched: that expectation keys on another recipient
+
+  await clearExpectation(id, STUB_URL);
+  assert.equal(
+    (await journalByBody("email", email, STUB_URL)).length,
+    1,
+    "disposing an expectation must not prune a capture it never claimed"
+  );
+
+  const res = await fetch(`${STUB_URL}/__proxy/requests`, { method: "DELETE" });
+  assert.equal(res.status, 200);
+  assert.equal((await (await fetch(`${STUB_URL}/__proxy/requests`)).json()).length, 0, "DELETE /requests clears them");
+});
+
+// PROXY_JOURNAL_MAX is the standing bound on stubbed traffic: a stack left running
+// appends one entry per poll forever with no client to dispose anything.
+test("no upstream: the journal cap holds under an unmatched flood, keeping the newest", async () => {
+  const url = await spawnProxy({ PROXY_JOURNAL_MAX: "10" });
+  // Sequential, so "the newest 10" is a deterministic claim rather than a race.
+  for (let i = 0; i < 25; i++) await appSends(`flood.${i}@test.local`, `tok-${i}`, url);
+
+  const entries = await (await fetch(`${url}/__proxy/requests`)).json();
+  assert.equal(entries.length, 10, "the cap must hold — an unbounded journal is a leak in a long-running stack");
+  assert.deepEqual(
+    entries.map(tokenOf),
+    Array.from({ length: 10 }, (_, i) => `tok-${i + 15}`),
+    "it is a ring buffer: the oldest are dropped and the newest 10 survive, in order"
+  );
 });

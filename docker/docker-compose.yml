@@ -36,14 +36,12 @@ services:
       retries: 10
       start_period: 10s
 
-  # The Spring API, built from its own repo's Dockerfile. The `local` profile
-  # (application-local.yml) already points the datasource at postgres:5432 and seeds
-  # the admin (admin@vechemoga.bg / admin). The one thing that profile leaves off is
-  # transactional email (no capture server exists for a bare host run) - but this
-  # stack DOES run one, so we turn email on here and point it at the provider-proxy, via
-  # -D system properties in JAVA_OPTS (the image entrypoint is `java $JAVA_OPTS -jar`;
-  # the -D form avoids env-var relaxed-binding surprises). Property names verified
-  # against the BE: vechemoga.email.enabled (LoopsMailConfig), vechemoga.email.loops.base-url.
+  # The Spring API, built from its own repo's Dockerfile. Everything it needs is in the
+  # `local` profile (application-local.yml): the datasource at postgres:5432, the seeded
+  # admin (admin@vechemoga.bg / admin), transactional email and ESP both ON, and both Loops
+  # base-urls pointed at http://provider-proxy:1080. That profile describes exactly this
+  # stack, so there is nothing to override from here - the provider-proxy service below is
+  # what makes turning the providers on safe.
   api:
     build:
       context: ../../VecheMogaApi
@@ -51,10 +49,7 @@ services:
     image: 'vechemoga-api:local'
     environment:
       - 'SPRING_PROFILES_ACTIVE=local'
-      - >-
-        JAVA_OPTS=-XX:MaxRAMPercentage=75
-        -Dvechemoga.email.enabled=true
-        -Dvechemoga.email.loops.base-url=http://provider-proxy:1080
+      - 'JAVA_OPTS=-XX:MaxRAMPercentage=75'
     ports:
       - '${API_PORT:-8080}:8080'
     depends_on:
@@ -71,17 +66,20 @@ services:
       start_period: 40s
 
   # First-party, zero-dependency provider proxy-mock (Node's http only), owned by this repo
-  # (../provider-proxy - see its README for the control plane). It sits in front of the API's
-  # transactional-email provider for the whole stack, tests or not: a client registers an
-  # expectation keyed on the recipient email via the control plane at
-  # http://localhost:1080/__proxy/* and reads the verification link back out of the journal
-  # (GET /__proxy/requests); anything unmatched goes to PROXY_UPSTREAM_URL.
+  # (../provider-proxy - see its README for the control plane). It stands in for the API's
+  # outbound HTTP providers (Loops, for both transactional email and ESP contact sync) for
+  # the whole stack, tests or not: a client registers an expectation keyed on the recipient
+  # email via the control plane at http://localhost:1080/__proxy/* and reads the verification
+  # link back out of the journal (GET /__proxy/requests).
   #
-  # PROXY_UPSTREAM_URL is deliberately EMPTY by default, so unmatched mail 502s instead of
-  # reaching real inboxes - an unmatched send is either a test that forgot to register an
-  # expectation or a hand-registration in the browser, and neither should page a real person.
+  # PROXY_UPSTREAM_URL is deliberately EMPTY by default, and that is what makes it safe for
+  # the `local` profile to run the REAL Loops clients against this: with no upstream, there
+  # is no path from here to a real inbox - unmatched traffic is stubbed 200 and journaled
+  # rather than forwarded. That also makes the ESP poller, which registers no expectation for
+  # its 60s sweep, a clean no-op instead of a pile of failures.
   # Set it in .env (see ../.env.example) to https://app.loops.so/api to opt into passthrough.
-  # Mounted read-only: the script needs no install, so the stock node image runs it as-is.
+  # Mounted read-only: the script needs no install, so the stock node image runs it as-is
+  # (../provider-proxy/Dockerfile exists for deploying it elsewhere, and is unused here).
   provider-proxy:
     image: 'node:20-alpine'
     working_dir: /app

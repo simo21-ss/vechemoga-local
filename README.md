@@ -105,12 +105,12 @@ with the stack out of the box. The suite **never** targets production.
 ## How the pieces fit
 
 - **API** runs the Spring `local` profile (`application-local.yml`): datasource →
-  `postgres:5432`, admin **seeded** (`admin@vechemoga.bg` / `admin`), ESP/S3 off.
-  Liquibase migrates the schema on boot — no SQL seed files to mount. The one thing
-  that profile leaves off is transactional email (a bare host run has nowhere to send
-  it), so — because this stack *does* run a capture server — the compose turns email
-  on via `JAVA_OPTS` `-D` properties: `vechemoga.email.enabled=true` +
-  `vechemoga.email.loops.base-url=http://provider-proxy:1080`.
+  `postgres:5432`, admin **seeded** (`admin@vechemoga.bg` / `admin`), S3 off.
+  Liquibase migrates the schema on boot — no SQL seed files to mount. Transactional
+  email **and** ESP contact sync are **on**, with both Loops base-urls pointed at
+  `http://provider-proxy:1080` — so the real provider clients run for real (real HTTP,
+  real serialization, real error handling) and the proxy absorbs the call. The compose
+  overrides none of it: the profile describes this stack.
 - **Web** runs `next dev` with its committed `env.local` profile (same as
   `npm run dev:compose`). The **browser never calls the API directly**: `env.local`
   leaves `NEXT_PUBLIC_API_BASE_URL` empty, so client calls go same-origin to `/api/*`
@@ -121,11 +121,12 @@ with the stack out of the box. The suite **never** targets production.
   `SameSite=Lax` cookies would be dropped. Server-side rendering uses the same origin.
 - **provider-proxy** is this repo's own [`provider-proxy/provider-proxy.mjs`](provider-proxy/README.md) —
   a zero-dependency provider proxy-mock, mounted read-only into a `node:20-alpine`
-  container (it needs no install). It sits in front of the API's transactional-email
-  provider: a client registers an expectation over the control plane at
-  `http://localhost:1080/__proxy/*` and reads the captured send (e.g. a verification
-  link) back out of `GET /__proxy/requests`. Unmatched mail goes to `PROXY_UPSTREAM_URL`,
-  which is **unset by default** so nothing can reach a real inbox — see
+  container (it needs no install). It stands in for the API's outbound providers: a client
+  registers an expectation over the control plane at `http://localhost:1080/__proxy/*` and
+  reads the captured send (e.g. a verification link) back out of `GET /__proxy/requests`.
+  Traffic no expectation matched is **stubbed `200` and journaled**, so it is still readable
+  after the fact and a background poller needs no expectation at all. `PROXY_UPSTREAM_URL`
+  is **unset by default**, which is what guarantees nothing can reach a real inbox — see
   [`.env.example`](.env.example) to opt into forwarding to the real provider.
 
 ## Notes
