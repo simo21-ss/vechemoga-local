@@ -1,20 +1,23 @@
 // Tiny, dependency-free provider proxy-mock (Node built-in http only).
 //
-// It sits in front of an outbound provider the VecheMoga API calls (Loops for
-// transactional email, and any other HTTP provider later). Point the API's
-// provider base URL at this server once (e.g. -Dvechemoga.email.loops.base-url=
-// http://localhost:1080) and it behaves like WireMock's proxy pattern:
+// It sits in front of the outbound providers the VecheMoga API calls (Loops, for both
+// transactional email and ESP contact sync; any other HTTP provider later). The API's
+// off-prod profiles already point their provider base-urls at it (vechemoga.email.loops
+// and vechemoga.esp.loops), and it behaves like WireMock's proxy pattern:
 //
-//   - Unmatched traffic is forwarded to PROXY_UPSTREAM_URL and the real response is
-//     returned, so an already-running API is unaffected until a test opts in. In the
-//     local stack that variable is deliberately UNSET (see ../.env.example), so
-//     unmatched mail 502s loudly instead of reaching real recipients; set it to
-//     https://app.loops.so/api when you actually want passthrough.
+//   - Unmatched traffic is STUBBED with 200 {"success":true} and journaled. Nothing
+//     reaches the real provider, so off-prod can point the real Loops clients here and
+//     run the whole pipeline for real - including a poller that registers no
+//     expectation at all, which is simply absorbed.
+//   - Set PROXY_UPSTREAM_URL to forward unmatched traffic to the real provider and
+//     return its response instead. Deliberately UNSET in the local stack (see
+//     ../.env.example): off is what keeps a laptop from mailing a real inbox.
 //   - A test registers an EXPECTATION at runtime (keyed on a unique field, the
 //     way Sesame keys a WireMock stub on a player id). A request matching that
-//     expectation is short-circuited: the canned response is returned and the
-//     request body is recorded so the test can read it back (e.g. the emailed
-//     verification link, whose token is only stored hashed in the DB).
+//     expectation gets that expectation's canned response instead of the stub, and
+//     its capture is tagged with the expectation id so a parallel suite can read
+//     back exactly its own (e.g. the emailed verification link, whose token is only
+//     stored hashed in the DB).
 //
 // No app restart, no application.yml rewrite, no third-party mock, no DB.
 //
@@ -31,12 +34,12 @@
 //   POST   /__proxy/expectations      body { method?, path?, bodyMatch?, respond? } -> { id }
 //   DELETE /__proxy/expectations/:id   remove one expectation
 //   DELETE /__proxy/expectations       remove all
-//   GET    /__proxy/requests           recorded (matched) requests, newest last
+//   GET    /__proxy/requests           recorded requests, newest last
 //   DELETE /__proxy/requests           clear the journal
 //   GET    /__proxy/health             { status, upstream }
 //
-// Data plane: anything else -> first matching expectation wins (canned response
-// + journal), otherwise proxied to PROXY_UPSTREAM_URL.
+// Data plane: anything else -> newest matching expectation wins (its canned response
+// + journal), else PROXY_UPSTREAM_URL if set, else the stub (+ journal).
 
 import http from "node:http";
 
@@ -52,19 +55,22 @@ function intEnv(name, fallback) {
 
 // The compose maps the host port and lets the container keep this default.
 const PORT = intEnv("PROXY_PORT", 1080);
-// Where unmatched traffic is proxied. Unset locally (tests always register an
-// expectation for their own traffic, so the proxy path is never taken); set it
-// in dev to the real provider so non-test traffic passes straight through.
+// Where unmatched traffic is proxied. Unset off-prod, where unmatched is stubbed
+// instead: that is the only thing standing between a dev machine and a real inbox.
 const UPSTREAM = (process.env.PROXY_UPSTREAM_URL ?? "").replace(/\/$/, "");
-// Safety cap so a suite that forgets to dispose can't grow the journal unbounded.
-// Disposing an expectation prunes its own entries, so in practice the journal tracks
-// only in-flight captures and stays far below this.
+// Hard bound on the journal, enforced as a ring buffer (oldest dropped first).
+// Disposing an expectation prunes its own captures, but stubbed unmatched entries are
+// tagged with no expectation id and so can never be pruned that way - a long-running
+// stack's poller appends forever. This cap, and DELETE /__proxy/requests, are their
+// only bounds, which is why it is enforced on every append rather than trusted to
+// tidy clients.
 const JOURNAL_MAX = intEnv("PROXY_JOURNAL_MAX", 5000);
 
 let seq = 0;
 /** @type {{ id: string, method?: string, path?: string, bodyMatch?: Record<string, unknown>, respond: { status: number, headers: Record<string,string>, body: string } }[]} */
 const expectations = [];
-/** @type {{ id: string, method: string, path: string, body: unknown, receivedAt: number, matchedExpectationId: string }[]} */
+/** matchedExpectationId is null for a stubbed (unmatched) request — nothing claimed it.
+ *  @type {{ id: string, method: string, path: string, body: unknown, receivedAt: number, matchedExpectationId: string | null }[]} */
 const journal = [];
 
 function json(res, status, body, headers = {}) {
@@ -92,7 +98,22 @@ function parseJson(raw) {
   }
 }
 
-/** Drop journal entries captured for a given expectation id (called when it's disposed). */
+/** Append one capture, trimming the oldest past JOURNAL_MAX. push()+splice is synchronous,
+ *  so concurrent sends can't interleave and lose an entry. */
+function record(method, reqPath, body, matchedExpectationId) {
+  journal.push({
+    id: `req_${++seq}`,
+    method,
+    path: reqPath,
+    body,
+    receivedAt: Date.now(),
+    matchedExpectationId,
+  });
+  if (journal.length > JOURNAL_MAX) journal.splice(0, journal.length - JOURNAL_MAX);
+}
+
+/** Drop journal entries captured for a given expectation id (called when it's disposed).
+ *  Stubbed entries carry a null id and are never pruned here — see JOURNAL_MAX. */
 function pruneJournalBy(expectationId) {
   for (let i = journal.length - 1; i >= 0; i--) {
     if (journal[i].matchedExpectationId === expectationId) journal.splice(i, 1);
@@ -138,16 +159,9 @@ function matches(exp, method, reqPath, parsedBody) {
   return true;
 }
 
-async function proxyThrough(req, reqPath, raw, res) {
-  if (!UPSTREAM) {
-    return json(res, 502, {
-      error:
-        "No expectation matched and PROXY_UPSTREAM_URL is not set, so there is nothing to proxy to. " +
-        "Register an expectation for this request, or set PROXY_UPSTREAM_URL to the real provider.",
-      method: req.method,
-      path: reqPath,
-    });
-  }
+/** Forward to the real provider and return its response verbatim. Only called with an
+ *  UPSTREAM set; without one, unmatched traffic is stubbed instead. */
+async function proxyThrough(req, raw, res) {
   const target = UPSTREAM + req.url;
   const reqHeaders = { ...req.headers };
   delete reqHeaders.host;
@@ -220,7 +234,8 @@ const server = http.createServer(async (req, res) => {
     if (method === "GET" && reqPath === "/__proxy/requests") {
       // Scope reads to a single expectation id, and/or a body-field equality, so a caller
       // never sees another scenario's captures. bodyPath/bodyValue is provider-agnostic
-      // (e.g. bodyPath=email for mail); the compare is case-insensitive.
+      // (e.g. bodyPath=email for mail); the compare is case-insensitive. It is also the
+      // only way to read a stubbed capture, which has no expectation id to scope by.
       const q = new URLSearchParams(req.url?.includes("?") ? req.url.slice(req.url.indexOf("?") + 1) : "");
       const byId = q.get("expectationId");
       const bodyPath = q.get("bodyPath");
@@ -264,27 +279,27 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (exp) {
-    // Record only matched (test-scoped) traffic — never real users' proxied mail.
-    // push()+trim is synchronous, so concurrent sends can't interleave here.
-    journal.push({
-      id: `req_${++seq}`,
-      method,
-      path: reqPath,
-      body: parsedBody ?? raw,
-      receivedAt: Date.now(),
-      matchedExpectationId: exp.id,
-    });
-    if (journal.length > JOURNAL_MAX) journal.splice(0, journal.length - JOURNAL_MAX);
+    record(method, reqPath, parsedBody ?? raw, exp.id);
     return res.writeHead(exp.respond.status, exp.respond.headers).end(exp.respond.body);
   }
 
-  return proxyThrough(req, reqPath, raw, res);
+  // Passthrough is opt-in and is the only path that reaches a real provider. It is also
+  // the only unjournaled one: a proxied request is a real user's, not a test's capture.
+  if (UPSTREAM) return proxyThrough(req, raw, res);
+
+  // No expectation, no upstream: stub it and record it. This is what lets off-prod point
+  // the real provider clients here — an unregistered send (the ESP poller sweeping every
+  // contact every 60s) is absorbed as a success rather than failed and retried into
+  // permanent abandonment. A suite that forgot to expect() still fails, but on its own
+  // assertion against the journal, which names the mistake.
+  record(method, reqPath, parsedBody ?? raw, null);
+  return json(res, 200, { success: true });
 });
 
 server.listen(PORT, () => {
   // eslint-disable-next-line no-console
   console.log(
     `provider-proxy listening on http://localhost:${PORT}` +
-      (UPSTREAM ? ` (unmatched -> ${UPSTREAM})` : " (no upstream; unmatched -> 502)")
+      (UPSTREAM ? ` (unmatched -> ${UPSTREAM})` : " (no upstream; unmatched -> stubbed 200 + journaled)")
   );
 });
