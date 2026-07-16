@@ -55,10 +55,11 @@ shows one group. `pgdata` persists across restarts; `clean` wipes it.
 
 **The API's providers are configured in its profile, not here.** `application-local.yml` turns transactional
 email *and* ESP on and points both Loops base-urls at `http://provider-proxy:1080`; `application-local-ide.yml`
-does the same at `http://localhost:1080` for a host-run API. The compose overrides nothing — its `JAVA_OPTS` is
-just `-XX:MaxRAMPercentage=75`. If a provider needs redirecting, change the profile in `VecheMogaApi`; that keeps
-one description of the stack rather than two that can disagree. (Should you ever need an override here anyway,
-use the **`-D` form, not env vars**: relaxed binding mangles `base-url` into `..._BASEURL` silently.)
+does the same at `http://localhost:1080` for a host-run API. The compose overrides nothing — it sets
+`SPRING_PROFILES_ACTIVE` and stops; even `JAVA_OPTS` is the API image's own. If a provider needs redirecting,
+change the profile in `VecheMogaApi`; that keeps one description of the stack rather than two that can disagree.
+(Should you ever need an override here anyway, use the **`-D` form, not env vars**: relaxed binding mangles
+`base-url` into `..._BASEURL` silently.)
 
 **Off-prod runs the real provider clients, not no-op ones.** The point is to exercise the real code path — real
 HTTP, real serialization, real error handling — and have the proxy absorb the last hop. A logging no-op exercises

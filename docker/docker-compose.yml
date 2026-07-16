@@ -41,7 +41,9 @@ services:
   # admin (admin@vechemoga.bg / admin), transactional email and ESP both ON, and both Loops
   # base-urls pointed at http://provider-proxy:1080. That profile describes exactly this
   # stack, so there is nothing to override from here - the provider-proxy service below is
-  # what makes turning the providers on safe.
+  # what makes turning the providers on safe. The profile is all this sets: JAVA_OPTS is the
+  # image's own (-XX:MaxRAMPercentage=75, expanded by its `java $JAVA_OPTS -jar` entrypoint),
+  # and repeating it here would only be a second place to change the heap.
   api:
     build:
       context: ../../VecheMogaApi
@@ -49,7 +51,6 @@ services:
     image: 'vechemoga-api:local'
     environment:
       - 'SPRING_PROFILES_ACTIVE=local'
-      - 'JAVA_OPTS=-XX:MaxRAMPercentage=75'
     ports:
       - '${API_PORT:-8080}:8080'
     depends_on:
