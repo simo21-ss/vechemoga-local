@@ -82,7 +82,10 @@ services:
   # Mounted read-only: the script needs no install, so the stock node image runs it as-is
   # (../provider-proxy/Dockerfile exists for deploying it elsewhere, and is unused here).
   provider-proxy:
-    image: 'node:20-alpine'
+    # Same digest as ../provider-proxy/Dockerfile, so the proxy you run here and the proxy
+    # built from that file are the same Node. Refresh both together:
+    #   docker buildx imagetools inspect node:20-alpine
+    image: 'node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293'
     working_dir: /app
     command: ['node', 'provider-proxy.mjs']
     volumes:

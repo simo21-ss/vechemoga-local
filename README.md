@@ -23,7 +23,8 @@ VecheMoga/
     │   ├── run.sh               interactive menu + non-interactive commands
     │   ├── stop.sh / clean.sh / showServiceNames.sh
     ├── provider-proxy/          source of the `provider-proxy` service (zero-dependency)
-    │   ├── provider-proxy.mjs   proxy-mock for the API's outbound providers (today: email)
+    │   ├── provider-proxy.mjs   proxy-mock for the API's outbound providers (mail + ESP)
+    │   ├── Dockerfile           for running it elsewhere; the stack bind-mounts instead
     │   └── test/                its contract test (`node --test test/`)
     └── .env.example             optional port/credential/upstream overrides
 ```
