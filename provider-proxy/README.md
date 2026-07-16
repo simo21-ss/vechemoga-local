@@ -133,6 +133,30 @@ hold. The **newest** matching expectation wins, so a re-registration supersedes 
 one. Unspecified fields match anything. `respond` defaults to `200 {"success": true}`,
 which is enough for the API's send to succeed.
 
+## A known limit: the stub only ever succeeds
+
+Pointing the real provider clients here runs their happy path for real, but the stub answers
+**everything** `200`, so any branch a client takes only on a provider *error* never runs
+off-prod by default.
+
+The one that matters today is in `LoopsEspSync.upsert`: it POSTs `/v1/contacts/create` and
+only falls back to `PUT /v1/contacts/update` when the create comes back `409 CONFLICT`. Under
+the stub the create always succeeds, so the update path — the one carrying the "never send
+`subscribed` here" rule — is unexercised unless a test asks for it.
+
+Asking is what `respond` is for. An expectation can return any status, so a test drives the
+error branch deliberately:
+
+```bash
+# Force the 409 that sends LoopsEspSync down its update path.
+curl -sX POST localhost:1080/__proxy/expectations \
+  -H 'content-type: application/json' \
+  -d '{"method":"POST","path":"/v1/contacts/create","respond":{"status":409}}'
+```
+
+So the limit is "not by default", not "not possible" — but a client's error handling is only
+covered off-prod to the extent a test goes looking for it.
+
 ## Tests
 
 ```bash

@@ -385,12 +385,41 @@ test("no upstream: unmatched is journaled and readable by bodyPath after the fac
 test("no upstream: unmatched never reaches the real provider", async () => {
   await ensureStubUp();
   const email = `stub.c+${rand()}@test.local`;
-  const before = upstreamHits.length;
   const body = await (await appSends(email, "tok-NO-LEAK", STUB_URL)).json();
 
-  assert.equal(upstreamHits.length, before, "with no upstream configured, nothing may leave");
+  // Assert the instance under test really is upstream-less, rather than counting hits on a
+  // fake upstream it was never given the address of — that count cannot move either way, so
+  // it would hold even if stub mode were broken outright.
+  const health = await (await fetch(`${STUB_URL}/__proxy/health`)).json();
+  assert.equal(health.upstream, null, "this instance must have no upstream at all — that is the safety property");
   assert.equal(body.from, undefined, "the response is the stub, not a provider's");
   assert.equal(upstreamHits.find((h) => h.email === email), undefined, "the recipient must never be seen upstream");
+});
+
+// The stub only ever succeeds, so a client branch taken on a provider error (LoopsEspSync
+// PUTs /v1/contacts/update only on a 409 from create) never runs off-prod by default.
+// `respond` is the escape hatch that makes it reachable — nothing else covers a custom status.
+test("an expectation's respond.status overrides the stub, so error branches are drivable", async () => {
+  await ensureStubUp();
+  const res = await fetch(`${STUB_URL}/__proxy/expectations`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ method: "POST", path: "/v1/contacts/create", respond: { status: 409 } }),
+  });
+  const { id } = await res.json();
+
+  const created = await fetch(`${STUB_URL}/v1/contacts/create`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: `conflict+${rand()}@test.local` }),
+  });
+  assert.equal(created.status, 409, "the expectation's status must win over the stub's 200");
+
+  const entries = await journalByExpectation(id, STUB_URL);
+  assert.equal(entries.length, 1, "a canned error is still journaled like any other capture");
+  assert.equal(entries[0].path, "/v1/contacts/create");
+
+  await clearExpectation(id, STUB_URL);
 });
 
 test("no upstream: an expectation still wins over the stub", async () => {

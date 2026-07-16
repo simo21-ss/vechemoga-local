@@ -9,8 +9,9 @@
 #
 # Build (context is this directory):  docker build -t vechemoga-provider-proxy .
 
-# Base pinned by digest for reproducible rebuilds (node:20-alpine).
-# Refresh: docker buildx imagetools inspect node:20-alpine
+# Base pinned by digest for reproducible rebuilds (node:20-alpine). ../docker/docker-compose.yml
+# pins the same digest, so the stack and this image are never a different Node; refresh both
+# together: docker buildx imagetools inspect node:20-alpine
 FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293
 WORKDIR /app
 COPY provider-proxy.mjs ./
