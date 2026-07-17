@@ -39,5 +39,6 @@ Steps:
    revision needs `./run.sh up`** to pick it up (every `up` passes `--remove-orphans`, which clears a container
    left behind by a renamed service). Then give the user **phase 2**: Archive the worktree session in the Claude
    Code UI, then from the main checkout printed above run
-   `git worktree prune && git branch -D <branch> && git pull --ff-only` (skip `branch -D` if `--delete-branch`
+   `git worktree prune && git branch -D <branch> && git checkout main && git pull --ff-only` — check out `main`
+   (the branch the PR merged into) and fast-forward it to the merge (skip `branch -D` if `--delete-branch`
    already removed the local branch).
