@@ -55,7 +55,10 @@ services:
       # The API reaches the container over the compose network, so this affects host access
       # only - PROXY_PORT remaps the host side, WireMock always listens on 1080 inside.
       - '127.0.0.1:${PROXY_PORT:-1080}:1080'
-    mem_limit: 768m
+    deploy:
+      resources:
+        limits:
+          memory: 768m
     # No healthcheck block: the image ships its own on /__admin/health, which is what api's
     # `depends_on: service_healthy` consumes.
 
