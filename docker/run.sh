@@ -51,11 +51,12 @@ POSTGRES_PORT="${POSTGRES_PORT:-$(env_val POSTGRES_PORT)}"; POSTGRES_PORT="${POS
 PROXY_PORT="${PROXY_PORT:-$(env_val PROXY_PORT)}";     PROXY_PORT="${PROXY_PORT:-1080}"
 
 # The provider-proxy is a pulled release image (see docker-compose.yml). These mirror the
-# compose defaults only so the ECR hint below can name the exact image `up` tried to get.
+# compose defaults only so the ECR hint below can name the exact image `up` tried to get -
+# so the TAG default has to track the compose one, including the deliberate not-:latest pin.
 PROVIDER_PROXY_IMAGE="${PROVIDER_PROXY_IMAGE:-$(env_val PROVIDER_PROXY_IMAGE)}"
 PROVIDER_PROXY_IMAGE="${PROVIDER_PROXY_IMAGE:-776051122865.dkr.ecr.eu-central-1.amazonaws.com/vechemoga/provider-proxy}"
 PROVIDER_PROXY_TAG="${PROVIDER_PROXY_TAG:-$(env_val PROVIDER_PROXY_TAG)}"
-PROVIDER_PROXY_TAG="${PROVIDER_PROXY_TAG:-latest}"
+PROVIDER_PROXY_TAG="${PROVIDER_PROXY_TAG:-b52518d089bf}"
 
 # Prefer the Compose v2 plugin; fall back to the legacy binary.
 if docker compose version >/dev/null 2>&1; then
@@ -127,7 +128,8 @@ urls() {
   echo "  web       → http://localhost:${WEB_PORT}   (admin.localhost:${WEB_PORT} · kid.localhost:${WEB_PORT})"
   echo "  api       → http://localhost:${API_PORT}   (health: /actuator/health · ping: /api/ping)"
   echo "  postgres  → localhost:${POSTGRES_PORT}      (db/user/pass: vechemoga · admin: admin@vechemoga.bg / admin)"
-  echo "  proxy     → http://localhost:${PROXY_PORT}/__proxy/requests  (control plane: /__proxy/*)"
+  # Loopback-only by design: the Admin API is unauthenticated and can read captured bodies.
+  echo "  proxy     → http://127.0.0.1:${PROXY_PORT}/__admin/health  (WireMock Admin API: /__admin/*, localhost only)"
 }
 
 # --remove-orphans on every `up`: it drops containers whose service no longer exists in the
@@ -147,7 +149,7 @@ start_all() {
 start_infra() {
   up_or_hint dc up -d --remove-orphans postgres provider-proxy
   sync_ports_from_compose
-  wait_for provider-proxy "http://localhost:${PROXY_PORT}/__proxy/health"
+  wait_for provider-proxy "http://localhost:${PROXY_PORT}/__admin/health"
   echo
   echo "  postgres  → localhost:${POSTGRES_PORT}   ·   provider-proxy → http://localhost:${PROXY_PORT}"
   echo "Now run the apps yourself (API from the IDE, web via 'npm run dev:compose')."

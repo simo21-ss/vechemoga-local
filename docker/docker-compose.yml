@@ -1,23 +1,6 @@
-# VecheMoga full local stack: Postgres + the Spring API + the Next.js web app + a
-# proxy-mock for the API's outbound providers, all in containers. This is the umbrella
-# that ties the sibling app repos together (the analog of Sesame's
-# Local-Development/backend-docker) - the app Dockerfiles live in their own repos
-# (../../VecheMogaApi, ../../VecheMogaWeb), this file only composes them.
-#
-# It is automation-ready by default: the API's `local` profile already seeds the
-# admin (admin@vechemoga.bg / admin) and the provider-proxy captures outgoing email, so
-# the VecheMogaAutomation suite runs against `./run.sh up` with no extra mode.
-#
-# Drive it with ./run.sh (interactive menu or ./run.sh up|infra|no-api|no-web|...).
-#
-# Ports on the host: web 3000, api 8080, postgres 5432, provider-proxy 1080 - these match
-# VecheMogaAutomation's .env defaults, so the suite runs against this stack unchanged.
 name: vechemoga-local
 
 services:
-  # Mirrors VecheMogaApi/compose.yaml (same image, creds, healthcheck) so the API's
-  # `local` Spring profile reaches it at postgres:5432. Its own volume, independent
-  # of the vechemoga-api project's.
   postgres:
     image: 'postgres:17'
     environment:
@@ -36,14 +19,9 @@ services:
       retries: 10
       start_period: 10s
 
-  # The Spring API, built from its own repo's Dockerfile. Everything it needs is in the
-  # `local` profile (application-local.yml): the datasource at postgres:5432, the seeded
-  # admin (admin@vechemoga.bg / admin), transactional email and ESP both ON, and both Loops
-  # base-urls pointed at http://provider-proxy:1080. That profile describes exactly this
-  # stack, so there is nothing to override from here - the provider-proxy service below is
-  # what makes turning the providers on safe. The profile is all this sets: JAVA_OPTS is the
-  # image's own (-XX:MaxRAMPercentage=75, expanded by its `java $JAVA_OPTS -jar` entrypoint),
-  # and repeating it here would only be a second place to change the heap.
+  # The `local` profile (application-local.yml) already describes this stack - datasource,
+  # seeded admin, and every provider base-url pointed at provider-proxy:1080. Add overrides
+  # there, not here, so the stack has one description rather than two that can disagree.
   api:
     build:
       context: ../../VecheMogaApi
@@ -66,69 +44,43 @@ services:
       retries: 12
       start_period: 40s
 
-  # Provider proxy-mock (Loops stand-in for both transactional email and ESP contact sync),
-  # pulled as a released image. The source, contract test, and the AWS pipeline that
-  # publishes this image live in their own repo - github.com/simo21-ss/vechemoga-provider-proxy
-  # (sibling checkout: ../../VecheMogaProviderProxy); proxy changes happen there, never here.
-  # Every merge to its main pushes :<sha12> (immutable, per commit) and :latest (moving).
-  # The first pull (and any tag update) needs a one-time ECR login - run.sh prints the
-  # one-liner when the pull fails unauthenticated; once cached, `up` works fully offline.
-  #
-  # It stands in for the API's outbound HTTP providers for the whole stack, tests or not:
-  # a client registers an expectation via the control plane at http://localhost:1080/__proxy/*
-  # and reads the verification link back out of the journal (GET /__proxy/requests).
-  #
-  # PROXY_UPSTREAM_URL is deliberately EMPTY by default, and that is what makes it safe for
-  # the `local` profile to run the REAL Loops clients against this: with no upstream, there
-  # is no path from here to a real inbox - unmatched traffic is stubbed 200 and journaled
-  # rather than forwarded. That also makes the ESP poller, which registers no expectation for
-  # its 60s sweep, a clean no-op instead of a pile of failures.
-  # Set it in .env (see ../.env.example) to https://app.loops.so/api to opt into passthrough.
+  # Stock WireMock + mapping JSON, owned by github.com/simo21-ss/vechemoga-provider-proxy.
+  # One process fronts Loops and Stripe; it fails closed and has no egress.
   provider-proxy:
-    # Pin PROVIDER_PROXY_TAG to a :<sha12> in .env to reproduce an exact proxy build.
-    image: '${PROVIDER_PROXY_IMAGE:-776051122865.dkr.ecr.eu-central-1.amazonaws.com/vechemoga/provider-proxy}:${PROVIDER_PROXY_TAG:-latest}'
-    environment:
-      - 'PROXY_UPSTREAM_URL=${PROXY_UPSTREAM_URL:-}'
+    # Never :latest - that tag is deliberately not moved and still resolves to the retired
+    # Node proxy. Bump this pin when the proxy repo releases.
+    image: '${PROVIDER_PROXY_IMAGE:-776051122865.dkr.ecr.eu-central-1.amazonaws.com/vechemoga/provider-proxy}:${PROVIDER_PROXY_TAG:-b52518d089bf}'
     ports:
-      # Inside the container the proxy always listens on its default 1080 (no PROXY_PORT is
-      # passed in), so PROXY_PORT here only remaps the HOST side - one name, one meaning.
-      - '${PROXY_PORT:-1080}:1080'
-    # No healthcheck block: the image ships its own HEALTHCHECK (wget on /__proxy/health),
-    # and that is what api's `depends_on: condition: service_healthy` consumes.
+      # Loopback only: the Admin API is unauthenticated and can read captured request bodies.
+      # The API reaches the container over the compose network, so this affects host access
+      # only - PROXY_PORT remaps the host side, WireMock always listens on 1080 inside.
+      - '127.0.0.1:${PROXY_PORT:-1080}:1080'
+    mem_limit: 768m
+    # No healthcheck block: the image ships its own on /__admin/health, which is what api's
+    # `depends_on: service_healthy` consumes.
 
-  # The Next.js app, built from its own repo's Dockerfile (runs `next dev` with the
-  # env.local profile). No depends_on: the web app starts independently and tolerates
-  # the API not being ready yet, which keeps the `no-api` subset (web only, API from
-  # the IDE) working.
-  #
-  # The browser never talks to the API directly here: env.local leaves the public base
-  # URL empty, so client calls go same-origin to /api/* on whichever host the page is
-  # on (localhost / admin.localhost / kid.localhost) and Next proxies them to
-  # API_INTERNAL_BASE_URL. That is what lets the admin/kid subdomains authenticate -
-  # each *.localhost is its own site, so a direct call to localhost:8080 would be
-  # cross-site and the API's SameSite=Lax cookies would be dropped. Server-side render
-  # uses the same origin.
+  # No depends_on: the web tolerates the API not being up, which keeps `no-api` working.
   web:
     build:
       context: ../../VecheMogaWeb
       dockerfile: Dockerfile
     image: 'vechemoga-web:local'
     environment:
-      # Server-side (SSR) API origin. Defaults to the api service on the compose
-      # network; run.sh's `no-api` subset overrides it to host.docker.internal so a
-      # containerised web can reach an API you run from the IDE on the host.
+      # SSR-only API origin. env.local leaves the PUBLIC base url empty on purpose, so browser
+      # calls go same-origin to /api/* and Next proxies them here - that is what lets the
+      # admin./kid.localhost subdomains authenticate, since a direct call to localhost:8080
+      # would be cross-site and the API's SameSite=Lax cookies would be dropped.
+      # run.sh's `no-api` overrides this to host.docker.internal for an IDE-run API.
       - 'API_INTERNAL_BASE_URL=${API_INTERNAL_BASE_URL:-http://api:8080}'
     extra_hosts:
-      # Linux parity: Docker Desktop (mac/win) resolves host.docker.internal already.
+      # Linux parity: Docker Desktop resolves host.docker.internal already.
       - 'host.docker.internal:host-gateway'
     ports:
       - '${WEB_PORT:-3000}:3000'
     restart: unless-stopped
     healthcheck:
-      # "Healthy" = the dev server answers with ANY HTTP status. The apex homepage
-      # 500s until a CMS home page is published (fresh DB), so a status-strict probe
-      # would wrongly mark the app down - node exits 0 on any response, 1 only on a
-      # connection error. node is always present in the image.
+      # Any HTTP status counts: the apex homepage 500s until a CMS home page exists, so a
+      # status-strict probe would wrongly mark a fresh stack down.
       test:
         - 'CMD'
         - 'node'
