@@ -43,9 +43,25 @@ docker compose -f docker/docker-compose.yml config -q   # compose parses + inter
 bash -n docker/run.sh                                   # run.sh syntax
 ```
 
-The real check is behavioural: `./run.sh up`, then run the suite against it
-(`cd ../VecheMogaAutomation && npm run test:smoke`). A change to the compose or the proxy is not verified
-until the API has actually reached the proxy and a mailbox scenario has captured a token.
+The real check is behavioural: a change to the compose or the mock is not verified until the API has
+actually reached the mock and a send has been captured. `./run.sh up`, then drive one by hand:
+
+```bash
+P=http://127.0.0.1:1080
+curl -sS -X POST $P/__admin/mappings -H 'Content-Type: application/json' \
+  -d '{"metadata":{"scenarioId":"check"},"request":{"method":"POST","urlPath":"/api/v1/transactional"},
+       "response":{"status":200,"jsonBody":{"success":true}}}'
+# trigger a send in the app, then read it back (extract one field - do not dump the body):
+curl -sS -X POST $P/__admin/requests/find -H 'Content-Type: application/json' \
+  -d '{"method":"POST","urlPath":"/api/v1/transactional"}' | jq -r '.requests[-1].body' | jq -r '.dataVariables.verificationUrl'
+curl -sS -X POST $P/__admin/mappings/remove-by-metadata -H 'Content-Type: application/json' \
+  -d '{"matchesJsonPath":{"expression":"$.scenarioId","equalTo":"check"}}'
+```
+
+**`npm run test:smoke` is not usable as that check yet.** `VecheMogaAutomation` still calls the retired
+`/__proxy/*` control plane, so every mailbox scenario fails against this stack regardless of whether the
+change is correct. Use the hand-driven capture above until that repo migrates; then this reverts to
+`cd ../VecheMogaAutomation && npm run test:smoke`.
 
 ## Architecture
 

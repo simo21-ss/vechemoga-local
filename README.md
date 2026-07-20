@@ -92,10 +92,16 @@ Desktop shows one group. DB data persists in the `pgdata` volume across restarts
 
 ## Running the automation suite against this stack
 
+> **The suite does not pass against this stack yet.** It still drives the retired `/__proxy/*`
+> control plane, which the WireMock mock answers `404 no_matching_stub`, so every mailbox
+> scenario fails no matter what the stack does. Its migration to `/__admin/*` is the
+> outstanding companion change; until it lands, verify captures by hand (see
+> [Working with the provider mock](#working-with-the-provider-mock)). The rest of this
+> section describes how the two fit together, and applies again once that migration ships.
+
 The suite ([`VecheMogaAutomation`](../VecheMogaAutomation)) runs on the **host** and
-targets the published ports. The default stack is already automation-ready — the API's
-`local` profile seeds the admin and the provider-proxy captures outgoing email — so there
-is no special mode: `./run.sh up` is enough.
+targets the published ports. The API's `local` profile seeds the admin and the mock captures
+outgoing email, so there is no special mode: `./run.sh up` is enough.
 
 ```bash
 cd docker

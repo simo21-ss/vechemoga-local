@@ -96,6 +96,26 @@ sync_ports_from_compose() {
 # updates). Point at the one-liner instead of leaving a bare compose error. Deliberately no
 # automatic `aws` call: once the image is cached, the whole stack must keep working offline.
 up_or_hint() {
+  # Every start path routes through here, so this is the one place the tag has to be sane.
+  # :latest is not the current proxy - the proxy pipeline deliberately does not move it, so
+  # it still resolves to the retired Node image, which serves the removed /__proxy/* control
+  # plane. That image passes its OWN healthcheck, so compose would report a green stack while
+  # the API talks to the wrong contract; refuse it up front rather than let it half-work.
+  if [[ "$PROVIDER_PROXY_TAG" == "latest" ]]; then
+    cat >&2 <<EOF
+ERROR: PROVIDER_PROXY_TAG=latest is not a usable provider-proxy build.
+
+That tag still points at the retired Node proxy (control plane /__proxy/*), which this
+stack no longer speaks - it would start, look healthy, and fail in confusing ways.
+
+Pin an exact build instead, in .env or the environment:
+
+  PROVIDER_PROXY_TAG=b52518d089bf
+
+EOF
+    return 1
+  fi
+
   "$@" && return 0
   local status=$?
   if ! docker image inspect "${PROVIDER_PROXY_IMAGE}:${PROVIDER_PROXY_TAG}" >/dev/null 2>&1; then
@@ -113,6 +133,9 @@ EOF
   return "$status"
 }
 
+# Non-zero on timeout, deliberately: a service that never answered is a failed start, not a
+# slow one. Callers report which service and exit - swallowing this is how a stack on the
+# wrong image, a failed pull or a taken port used to still print the success banner.
 wait_for() { # name url
   local name="$1" url="$2" i
   printf 'Waiting for %s (%s) ' "$name" "$url"
@@ -120,7 +143,14 @@ wait_for() { # name url
     if curl -fsS "$url" >/dev/null 2>&1; then echo " up."; return 0; fi
     printf '.'; sleep 2
   done
-  echo " timed out (still starting - check ./run.sh logs)."; return 0
+  echo " TIMED OUT."; return 1
+}
+
+# `if ! wait_for` keeps this out of `set -e`'s reach so the message actually prints.
+wait_or_die() { # name url
+  wait_for "$@" && return 0
+  echo "ERROR: $1 never became healthy. Check: ./run.sh logs $1" >&2
+  exit 1
 }
 
 urls() {
@@ -139,7 +169,7 @@ urls() {
 start_all() {
   up_or_hint dc up -d --build --remove-orphans
   sync_ports_from_compose
-  wait_for api "http://localhost:${API_PORT}/actuator/health"
+  wait_or_die api "http://localhost:${API_PORT}/actuator/health"
   urls
   echo
   echo "Automation-ready. Run the suite against it:"
@@ -149,9 +179,9 @@ start_all() {
 start_infra() {
   up_or_hint dc up -d --remove-orphans postgres provider-proxy
   sync_ports_from_compose
-  wait_for provider-proxy "http://localhost:${PROXY_PORT}/__admin/health"
+  wait_or_die provider-proxy "http://127.0.0.1:${PROXY_PORT}/__admin/health"
   echo
-  echo "  postgres  → localhost:${POSTGRES_PORT}   ·   provider-proxy → http://localhost:${PROXY_PORT}"
+  echo "  postgres  → localhost:${POSTGRES_PORT}   ·   provider-proxy → http://127.0.0.1:${PROXY_PORT}/__admin/  (localhost only)"
   echo "Now run the apps yourself (API from the IDE, web via 'npm run dev:compose')."
 }
 
@@ -168,7 +198,7 @@ start_no_api() {
 start_no_web() {
   up_or_hint dc up -d --build --remove-orphans --scale web=0
   sync_ports_from_compose
-  wait_for api "http://localhost:${API_PORT}/actuator/health"
+  wait_or_die api "http://localhost:${API_PORT}/actuator/health"
   urls
   echo "Web is NOT running - start it from the host:  cd ../../VecheMogaWeb && npm run dev:compose"
 }
