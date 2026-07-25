@@ -140,7 +140,7 @@ with the stack out of the box. The suite **never** targets production.
   **stock WireMock 3.13.2 plus that repo's mapping JSON**, and nothing else — no custom
   server, no extension, no control plane of our own. One process fronts **both** Loops
   (transactional mail + ESP) and Stripe. Its AWS pipeline pushes `:<sha12>` per commit;
-  this stack **pins an exact SHA** (`b52518d089bf`), and you should not change it to
+  this stack **pins an exact SHA** (the compose default), and you should not change it to
   `latest` — see [Pinning](#pinning-and-why-not-latest) below.
 
   Drive it through **WireMock's own Admin API** at `http://127.0.0.1:1080/__admin/*`:
@@ -258,7 +258,7 @@ curl -sS "$PROXY/__admin/requests/unmatched"     # what arrived that nothing cla
 
 ### Pinning, and why not `latest`
 
-`PROVIDER_PROXY_TAG` defaults to the exact build `b52518d089bf`. **Do not set it to
+`PROVIDER_PROXY_TAG` defaults to the exact build pinned in the compose file. **Do not set it to
 `latest`.** The proxy pipeline deliberately does not move that tag — it still resolves to
 the *retired* Node proxy that served the removed `/__proxy/*` control plane, kept in place
 so unmigrated stacks keep working. A stack on `:latest` comes up fine and then fails in
