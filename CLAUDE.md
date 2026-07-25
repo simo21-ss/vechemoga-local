@@ -70,8 +70,11 @@ builds application code. Everything runs under the single Compose project `veche
 shows one group. `pgdata` persists across restarts; `clean` wipes it.
 
 **The API's providers are configured in its profile, not here.** `application-local.yml` turns transactional
-email *and* ESP on and points both Loops base-urls **and the Stripe base-url** at `http://provider-proxy:1080`;
-`application-local-ide.yml` does the same at `http://localhost:1080` for a host-run API. The compose overrides nothing — it sets
+email *and* ESP on and points the Loops base-urls at `http://provider-proxy-loops:1080` **and the Stripe base-url**
+at `http://provider-proxy-stripe:1080` — split hostnames matching the dev topology, both resolving to the one
+`provider-proxy` WireMock via compose network aliases. (`application-local-ide.yml`, for a host-run API,
+must instead point **both** split names at `http://localhost:1080` — the aliases live only inside the compose
+network, so a host process can't resolve `provider-proxy-loops`/`-stripe`.) The compose overrides nothing — it sets
 `SPRING_PROFILES_ACTIVE` and stops; even `JAVA_OPTS` is the API image's own. If a provider needs redirecting,
 change the profile in `VecheMogaApi`; that keeps one description of the stack rather than two that can disagree.
 (Should you ever need an override here anyway, use the **`-D` form, not env vars**: relaxed binding mangles

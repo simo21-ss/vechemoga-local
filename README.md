@@ -122,8 +122,10 @@ with the stack out of the box. The suite **never** targets production.
 - **API** runs the Spring `local` profile (`application-local.yml`): datasource →
   `postgres:5432`, admin **seeded** (`admin@vechemoga.bg` / `admin`), S3 off.
   Liquibase migrates the schema on boot — no SQL seed files to mount. Transactional
-  email **and** ESP contact sync are **on**, with both Loops base-urls *and* the Stripe
-  base-url pointed at `http://provider-proxy:1080` — one mock process fronts every
+  email **and** ESP contact sync are **on**, with the Loops base-urls pointed at
+  `http://provider-proxy-loops:1080` and the Stripe base-url at
+  `http://provider-proxy-stripe:1080` — split hostnames matching the dev topology, both
+  resolving via compose aliases to the one `provider-proxy` mock process that fronts every
   provider, so the real provider clients run for real (real HTTP, real serialization, real
   error handling) and WireMock absorbs the last hop. The compose overrides none of it: the
   profile describes this stack.
