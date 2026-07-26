@@ -56,7 +56,7 @@ PROXY_PORT="${PROXY_PORT:-$(env_val PROXY_PORT)}";     PROXY_PORT="${PROXY_PORT:
 PROVIDER_PROXY_IMAGE="${PROVIDER_PROXY_IMAGE:-$(env_val PROVIDER_PROXY_IMAGE)}"
 PROVIDER_PROXY_IMAGE="${PROVIDER_PROXY_IMAGE:-776051122865.dkr.ecr.eu-central-1.amazonaws.com/vechemoga/provider-proxy}"
 PROVIDER_PROXY_TAG="${PROVIDER_PROXY_TAG:-$(env_val PROVIDER_PROXY_TAG)}"
-PROVIDER_PROXY_TAG="${PROVIDER_PROXY_TAG:-22d0ea45e6ee}"
+PROVIDER_PROXY_TAG="${PROVIDER_PROXY_TAG:-22d0ea45e6ee@sha256:d7a94b48ff71183eaee8f38c5c72e1d3371f16861b3550ec00c43f843b588284}"
 
 # Prefer the Compose v2 plugin; fall back to the legacy binary.
 if docker compose version >/dev/null 2>&1; then
@@ -110,7 +110,7 @@ stack no longer speaks - it would start, look healthy, and fail in confusing way
 
 Pin an exact build instead, in .env or the environment:
 
-  PROVIDER_PROXY_TAG=22d0ea45e6ee
+  PROVIDER_PROXY_TAG=22d0ea45e6ee@sha256:d7a94b48ff71183eaee8f38c5c72e1d3371f16861b3550ec00c43f843b588284
 
 EOF
     return 1

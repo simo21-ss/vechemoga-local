@@ -129,8 +129,10 @@ with the stack out of the box. The suite **never** targets production.
   provider, so the real provider clients run for real (real HTTP, real serialization, real
   error handling) and WireMock absorbs the last hop. A third alias,
   `http://provider-proxy-google:1080`, is wired for the BE's `vechemoga.google.certs-url`
-  (the Google id-token certs fetch) so that hostname resolves once the profile points it here.
-  The compose overrides none of it: the profile describes this stack.
+  (the Google id-token certs fetch) so that hostname resolves once the profile points it here —
+  but, exactly like Stripe `/v1/*` today, the Loops-scope pin serves no Google certs mapping, so
+  that fetch **fails closed (404)** until a companion `/oauth2/v3/certs` mapping (and tag bump)
+  lands in the proxy repo. The compose overrides none of it: the profile describes this stack.
 - **Web** runs `next dev` with its committed `env.local` profile (same as
   `npm run dev:compose`). The **browser never calls the API directly**: `env.local`
   leaves `NEXT_PUBLIC_API_BASE_URL` empty, so client calls go same-origin to `/api/*`
