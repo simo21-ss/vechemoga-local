@@ -124,11 +124,13 @@ with the stack out of the box. The suite **never** targets production.
   Liquibase migrates the schema on boot — no SQL seed files to mount. Transactional
   email **and** ESP contact sync are **on**, with the Loops base-urls pointed at
   `http://provider-proxy-loops:1080` and the Stripe base-url at
-  `http://provider-proxy-stripe:1080` — split hostnames matching the dev topology, both
+  `http://provider-proxy-stripe:1080` — split hostnames matching the dev topology, all
   resolving via compose aliases to the one `provider-proxy` mock process that fronts every
   provider, so the real provider clients run for real (real HTTP, real serialization, real
-  error handling) and WireMock absorbs the last hop. The compose overrides none of it: the
-  profile describes this stack.
+  error handling) and WireMock absorbs the last hop. A third alias,
+  `http://provider-proxy-google:1080`, is wired for the BE's `vechemoga.google.certs-url`
+  (the Google id-token certs fetch) so that hostname resolves once the profile points it here.
+  The compose overrides none of it: the profile describes this stack.
 - **Web** runs `next dev` with its committed `env.local` profile (same as
   `npm run dev:compose`). The **browser never calls the API directly**: `env.local`
   leaves `NEXT_PUBLIC_API_BASE_URL` empty, so client calls go same-origin to `/api/*`

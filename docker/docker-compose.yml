@@ -53,12 +53,14 @@ services:
     networks:
       # The BE's local/dev profiles address the providers by SPLIT hostnames
       # (provider-proxy-loops for Loops transactional + ESP contacts, provider-proxy-stripe for
-      # Stripe), matching the dev topology. Locally a single WireMock fronts both, so it answers
-      # to both names via aliases — otherwise the merged BE's sends fail with UnknownHostException.
+      # Stripe, provider-proxy-google for the Google id-token certs fetch), matching the dev
+      # topology. Locally a single WireMock fronts all of them, so it answers to every name via
+      # aliases — otherwise the merged BE's sends fail with UnknownHostException.
       default:
         aliases:
           - provider-proxy-loops
           - provider-proxy-stripe
+          - provider-proxy-google
     ports:
       # Loopback only: the Admin API is unauthenticated and can read captured request bodies.
       # The API reaches the container over the compose network, so this affects host access
