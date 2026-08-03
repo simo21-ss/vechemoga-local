@@ -4,10 +4,9 @@ argument-hint: "[pr-number]"
 ---
 
 Merge a GitHub pull request for the **vechemoga-local** repository. This command is self-contained
-(adapted from the sibling VecheMogaApi/VecheMogaWeb `/merge-pr`). Two steps there don't apply here and are
-intentionally omitted: the **base-branch guard** (their default branch is `prod`, so a PR can silently target
-it — this repo's default is `main` and there is no `dev`/`prod` split), and the Confluence **`/update-docs`**
-step (no business docs are driven from this repo).
+(adapted from the sibling VecheMogaApi/VecheMogaWeb `/merge-pr`). One step there doesn't apply here and is
+intentionally omitted: the **base-branch guard** — their default branch is `prod`, so a PR can silently target
+it, whereas this repo's default is `main` and there is no `dev`/`prod` split.
 
 **Target PR:** `$ARGUMENTS` — if empty, resolve it from the current branch with
 `gh pr view --json number,title,headRefName,baseRefName,state`.
@@ -39,6 +38,14 @@ Steps:
    revision needs `./run.sh up`** to pick it up (every `up` passes `--remove-orphans`, which clears a container
    left behind by a renamed service). Then give the user **phase 2**: Archive the worktree session in the Claude
    Code UI, then from the main checkout printed above run
-   `git worktree prune && git branch -D <branch> && git checkout main && git pull --ff-only` — check out `main`
-   (the branch the PR merged into) and fast-forward it to the merge (skip `branch -D` if `--delete-branch`
-   already removed the local branch).
+
+   ```bash
+   git worktree prune && git branch -D <branch>
+   git checkout main && git pull --ff-only
+   git fetch --prune
+   ```
+
+   That checks out `main` — the branch the PR merged into, and this repo's only long-lived branch — and
+   fast-forwards it to the merge. Skip `branch -D` if `--delete-branch` already removed the local branch.
+   **Do not stop before the local checkout is current**: this repo *is* the local stack, so a stale `main`
+   means `./run.sh up` brings up the old compose.
